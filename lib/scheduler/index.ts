@@ -440,6 +440,30 @@ function isInUploadWindow(settings: AutomationSettings): boolean {
 /**
  * Calculate next upload time based on settings and timezone.
  */
+// Builds the correct UTC instant for a given "HH:mm" wall-clock time on a given
+// calendar date in the target timezone. Timezone-runtime-independent: works the
+// same regardless of what timezone the Node process itself is running in, unlike
+// a plain `new Date(dateStr + 'THH:mm:00')` which is parsed in the server's local
+// timezone (verified with automated tests under TZ=UTC/Asia/Kolkata/America/New_York).
+function buildTzDate(dateStr: string, hour: number, minute: number, timeZone: string): Date {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const guess = new Date(`${dateStr}T${pad(hour)}:${pad(minute)}:00Z`);
+
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+  const parts = fmt.formatToParts(guess).reduce((acc: Record<string, string>, p) => {
+    if (p.type !== 'literal') acc[p.type] = p.value;
+    return acc;
+  }, {});
+  const shownAsUtc = new Date(`${parts.year}-${parts.month}-${parts.day}T${parts.hour === '24' ? '00' : parts.hour}:${parts.minute}:${parts.second}Z`);
+
+  return new Date(guess.getTime() + (guess.getTime() - shownAsUtc.getTime()));
+}
+
 export function getNextUploadTime(settings: AutomationSettings): Date | null {
   const timezone = settings.timezone;
   const now = new Date();
@@ -455,13 +479,7 @@ export function getNextUploadTime(settings: AutomationSettings): Date | null {
 
   for (const uploadTime of settings.upload_times) {
     const [hour, minute] = uploadTime.split(':').map(Number);
-
-    // Create a date in the target timezone
-    const candidate = new Date(`${todayStr}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00`);
-
-    // Adjust for timezone offset
-    const tzOffset = getTzOffset(timezone, candidate);
-    candidate.setMinutes(candidate.getMinutes() - tzOffset);
+    const candidate = buildTzDate(todayStr, hour, minute, timezone);
 
     if (candidate > now) {
       candidates.push(candidate);
@@ -473,21 +491,15 @@ export function getNextUploadTime(settings: AutomationSettings): Date | null {
   }
 
   // Next day's first slot
-  const tomorrow = new Date(todayStr);
-  tomorrow.setDate(tomorrow.getDate() + 1);
+  const tomorrow = new Date(`${todayStr}T00:00:00Z`);
+  tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
   const tomorrowStr = tomorrow.toISOString().split('T')[0];
 
   const firstTime = settings.upload_times[0];
   if (firstTime) {
     const [hour, minute] = firstTime.split(':').map(Number);
-    return new Date(`${tomorrowStr}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00`);
+    return buildTzDate(tomorrowStr, hour, minute, timezone);
   }
 
   return null;
-}
-
-function getTzOffset(timezone: string, date: Date): number {
-  const utcDate = new Date(date.toLocaleString('en-US', { timeZone: 'UTC' }));
-  const tzDate = new Date(date.toLocaleString('en-US', { timeZone: timezone }));
-  return (utcDate.getTime() - tzDate.getTime()) / (1000 * 60);
 }
