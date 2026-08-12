@@ -1,0 +1,16 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/scheduler",
+      "schedule": "0 * * * *"
+    }
+  ],
+  "functions": {
+    "app/api/cron/scheduler/route.ts": {
+      "maxDuration": 300
+    },
+    "app/api/drive/sync/route.ts": {
+      "maxDuration": 60
+    }
+  }
+}
