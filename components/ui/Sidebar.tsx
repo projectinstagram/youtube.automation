@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import {
   LayoutDashboard,
   ListVideo,
@@ -9,6 +9,7 @@ import {
   Activity,
   PlaySquare,
   Zap,
+  LogOut,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 
@@ -20,6 +21,13 @@ const NAV_ITEMS = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  const router = useRouter();
+
+  const signOut = async () => {
+    await fetch('/api/auth/logout', { method: 'POST' });
+    router.push('/login');
+    router.refresh();
+  };
 
   return (
     <aside className="fixed left-0 top-0 h-full w-64 bg-gray-900 border-r border-gray-800 flex flex-col z-50">
@@ -60,6 +68,13 @@ export function Sidebar() {
 
       {/* Footer */}
       <div className="px-4 py-4 border-t border-gray-800">
+        <button
+          onClick={signOut}
+          className="flex items-center gap-3 w-full px-3 py-2 mb-3 rounded-lg text-sm font-medium text-gray-400 hover:text-gray-200 hover:bg-gray-800 transition-all"
+        >
+          <LogOut className="w-4 h-4 flex-shrink-0" />
+          Sign out
+        </button>
         <div className="flex items-center gap-2 text-xs text-gray-500">
           <Zap className="w-3 h-3 text-yellow-500" />
           <span>Powered by Vercel Cron</span>
