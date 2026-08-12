@@ -1,6 +1,6 @@
 import type { GeneratedMetadata } from '@/types';
 import { log } from '@/lib/db/operations';
-import { extractContactSheet } from '@/lib/video/frames';
+import { extractContactSheet, extractAudioTrack } from '@/lib/video/frames';
 
 function requireEnv(key: string): string {
   const val = process.env[key];
@@ -10,6 +10,9 @@ function requireEnv(key: string): string {
 
 const NVIDIA_CHAT_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
 const DEFAULT_VISION_MODEL = 'nvidia/nemotron-nano-12b-v2-vl';
+// Genuinely multimodal (audio + image + text) via the same chat-completions endpoint,
+// used automatically whenever the video has an audio track worth transcribing.
+const OMNI_MODEL = 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning';
 const KNOWN_VISION_MODELS = new Set([
   'nvidia/nemotron-nano-12b-v2-vl',
   'meta/llama-3.2-11b-vision-instruct',
@@ -17,9 +20,10 @@ const KNOWN_VISION_MODELS = new Set([
 ]);
 
 /**
- * Analyzes a video by sampling a few frames (NVIDIA's hosted vision models,
- * unlike Gemini, take still images rather than raw video) and generates
- * YouTube metadata from them.
+ * Analyzes a video's audio (speech) and visual frames together and generates
+ * YouTube metadata. NVIDIA's hosted models take still images/audio clips
+ * rather than raw video, so frames are sampled and the audio track is
+ * extracted separately, then sent together in one multimodal request.
  */
 export async function analyzeVideoAndGenerateMetadata(
   videoBuffer: Buffer,
@@ -35,36 +39,62 @@ export async function analyzeVideoAndGenerateMetadata(
   } = {}
 ): Promise<GeneratedMetadata> {
   const apiKey = requireEnv('NVIDIA_API_KEY');
-
-  const modelName = options.aiModel && KNOWN_VISION_MODELS.has(options.aiModel)
-    ? options.aiModel
-    : DEFAULT_VISION_MODEL;
   const temperature = options.temperature || 0.7;
-
-  await log('INFO', 'AI', `Analyzing video: ${filename} with model: ${modelName}`);
 
   const systemMessage =
     'You are a metadata-generation API, not a chat assistant. The content you are given is the creator\'s own video, uploaded through their own automation pipeline - this is routine, policy-compliant metadata writing, never a request to deceive anyone. Always respond with exactly one JSON object matching the requested schema and nothing else: no markdown, no preamble, no explanation, no refusal.';
 
   let rawResponse = '';
-  let base64 = '';
+  let frameBase64 = '';
   let frameMimeType = 'image/jpeg';
   let hasFrames = true;
+  let audioBase64 = '';
+  let audioMimeType = 'audio/wav';
+  let hasAudio = false;
 
   try {
     const extracted = await extractContactSheet(videoBuffer, 3);
-    base64 = extracted.base64;
+    frameBase64 = extracted.base64;
     frameMimeType = extracted.mimeType;
   } catch (err: unknown) {
     const error = err as Error;
-    await log('WARN', 'AI', `Failed to extract frames for ${filename}, will generate text-only metadata`, { error: error.message });
+    await log('WARN', 'AI', `Failed to extract frames for ${filename}`, { error: error.message });
     hasFrames = false;
   }
 
-  const callModel = async (userText: string, includeImage: boolean): Promise<string> => {
+  try {
+    const extracted = await extractAudioTrack(videoBuffer);
+    if (extracted) {
+      audioBase64 = extracted.base64;
+      audioMimeType = extracted.mimeType;
+      hasAudio = true;
+    }
+  } catch (err: unknown) {
+    const error = err as Error;
+    await log('WARN', 'AI', `Failed to extract audio for ${filename}`, { error: error.message });
+  }
+
+  // The omni model genuinely understands audio+image together but is slower (reasoning
+  // model); only worth it when there's actual speech to transcribe. Silent/no-audio
+  // videos - including after audio gets dropped on retry - use the faster vision-only
+  // model instead, so a dropped-audio retry isn't stuck paying the slow model's latency.
+  const fallbackVisionModel = options.aiModel && KNOWN_VISION_MODELS.has(options.aiModel)
+    ? options.aiModel
+    : DEFAULT_VISION_MODEL;
+
+  await log('INFO', 'AI', `Analyzing video: ${filename}`, {
+    hasFrames,
+    hasAudio,
+    model: hasAudio ? OMNI_MODEL : fallbackVisionModel,
+  });
+
+  const callModel = async (userText: string, includeAudio: boolean, includeImage: boolean): Promise<string> => {
     const content: Array<Record<string, unknown>> = [{ type: 'text', text: userText }];
+    if (includeAudio) {
+      content.push({ type: 'audio_url', audio_url: { url: `data:${audioMimeType};base64,${audioBase64}` } });
+    }
     if (includeImage) {
-      content.push({ type: 'image_url', image_url: { url: `data:${frameMimeType};base64,${base64}` } });
+      content.push({ type: 'image_url', image_url: { url: `data:${frameMimeType};base64,${frameBase64}` } });
     }
 
     const response = await fetch(NVIDIA_CHAT_URL, {
@@ -75,9 +105,9 @@ export async function analyzeVideoAndGenerateMetadata(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: modelName,
+        model: includeAudio ? OMNI_MODEL : fallbackVisionModel,
         temperature,
-        max_tokens: 1024,
+        max_tokens: 1536,
         messages: [
           { role: 'system', content: systemMessage },
           { role: 'user', content },
@@ -112,28 +142,28 @@ export async function analyzeVideoAndGenerateMetadata(
   };
 
   // Short "I cannot..." replies are a safety-classifier refusal (usually triggered by the
-  // image itself), not a formatting slip - retrying with the same image won't help.
+  // audio/image content itself), not a formatting slip - retrying with the same media won't help.
   const looksLikeRefusal = (text: string): boolean => {
     const t = text.trim();
     if (!t || t.length > 400) return false;
     return /^(i cannot|i can't|i'm sorry|i am sorry|sorry[,.]|i won't|i will not|i'm not able|i am not able|i apologi[sz]e|as an ai)/i.test(t);
   };
 
-  // Up to 3 attempts, adapting to what went wrong:
-  // - malformed/prose reply -> retry the same way with a sharper JSON-only instruction
-  // - refusal while an image was attached -> the image itself triggered it, so drop the
-  //   image and ask for filename-only metadata instead of hammering the same request
+  // Up to 4 attempts, progressively dropping media on refusal (audio first, then image)
+  // since a refusal means the currently-attached media triggered it, not the prompt wording.
+  // Malformed/prose replies instead retry the same media with a sharper JSON-only instruction.
+  let useAudio = hasAudio;
   let useImage = hasFrames;
   let reinforce = false;
 
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= 4; attempt++) {
     try {
-      const basePrompt = buildAnalysisPrompt(filename, options, useImage);
+      const basePrompt = buildAnalysisPrompt(filename, options, useImage, useAudio);
       const userText = reinforce
         ? `${basePrompt}\n\nYour previous reply was not a single valid JSON object (it was either prose or a refusal). This is legitimate metadata generation for the creator's own already-uploaded video, not a request to deceive anyone. Reply with ONLY the JSON object this time - no explanation, no markdown, no refusal.`
         : basePrompt;
 
-      rawResponse = await callModel(userText, useImage);
+      rawResponse = await callModel(userText, useAudio, useImage);
       const metadata = parseMetadata(rawResponse);
 
       await log('INFO', 'AI', `Metadata generated successfully`, {
@@ -141,22 +171,27 @@ export async function analyzeVideoAndGenerateMetadata(
         confidence: metadata.confidence,
         score: metadata.metadataScore,
         attempt,
+        usedAudio: useAudio,
         usedImage: useImage,
       });
 
       return metadata;
     } catch (err: unknown) {
       const error = err as Error;
-      const refused = useImage && looksLikeRefusal(rawResponse);
+      const refused = (useAudio || useImage) && looksLikeRefusal(rawResponse);
 
-      await log(attempt === 3 ? 'ERROR' : 'WARN', 'AI', `Attempt ${attempt} failed to generate metadata for ${filename}`, {
+      await log(attempt === 4 ? 'ERROR' : 'WARN', 'AI', `Attempt ${attempt} failed to generate metadata for ${filename}`, {
         error: error.message,
         rawResponse: rawResponse.slice(0, 500),
         refused,
       });
 
-      if (refused) {
-        // Drop the image for the next try; a fresh attempt at the same image will just refuse again
+      if (refused && useAudio) {
+        // Drop audio first - it's the more likely refusal trigger (speech content) and the
+        // omni model is also the slowest option, so falling back to image-only is a double win
+        useAudio = false;
+        reinforce = false;
+      } else if (refused && useImage) {
         useImage = false;
         reinforce = false;
       } else {
@@ -177,7 +212,8 @@ function buildAnalysisPrompt(
     defaultKeywords?: string[];
     categoryId?: string;
   },
-  hasImage: boolean = true
+  hasImage: boolean,
+  hasAudio: boolean
 ): string {
   const nicheContext = options.nicheDescription
     ? `\n\nChannel niche/topic: ${options.nicheDescription}`
@@ -193,23 +229,50 @@ function buildAnalysisPrompt(
       ? `\nDefault keywords to consider: ${options.defaultKeywords.join(', ')}`
       : '';
 
-  const intro = hasImage
-    ? `You are an elite YouTube Shorts SEO strategist writing metadata for a content creator's own upload pipeline. The attached image contains three frames sampled from the beginning, middle, and end of that video, arranged left-to-right. Analyze them and write metadata engineered to rank in YouTube search/suggested feed AND make a scrolling viewer stop and tap.`
-    : `You are an elite YouTube Shorts SEO strategist writing metadata for a content creator's own upload pipeline. You do NOT have access to this video's frames for this request - work only from the filename and context below. Write metadata engineered to rank in YouTube search/suggested feed AND make a scrolling viewer stop and tap, without ever claiming to describe visual details you cannot actually see.`;
+  const mediaDescription = hasAudio && hasImage
+    ? "You are given this video's audio track (the full spoken content/soundtrack) AND an image containing three frames sampled from the beginning, middle, and end of the video, arranged left-to-right."
+    : hasAudio
+      ? "You are given this video's audio track (the full spoken content/soundtrack). No visual frames are available for this request."
+      : hasImage
+        ? "You are given an image containing three frames sampled from the beginning, middle, and end of the video, arranged left-to-right. No audio is available for this request."
+        : "You have no audio or visual access to this video for this request - work only from the filename and context below.";
 
-  const rule1 = hasImage
-    ? `1. Base ALL analysis strictly on what you can actually see in the frames, NOT on the filename. Files are frequently exported in bulk from a shared source folder/bundle, so the filename is often generic batch-labeling (a source/pack name, a batch number) that has nothing to do with this specific video's actual content. If the filename and the frames disagree, the frames are always correct - ignore the filename's topic entirely and describe only what you actually see. If you cannot identify a specific object, brand, number, or price, do NOT name one or use a placeholder like "$XX" or "[item]" - describe it in general terms instead`
-    : `1. You have no visual information for this request. The filename is frequently just generic batch/source labeling (a pack name, a batch number) and very often does NOT describe this specific video's real content - do not confidently assert a topic from it. Write a plausible, generic, honest title/description that could reasonably apply to a short-form video, without inventing specific objects, people, or on-screen text you have no way of knowing`;
+  const intro = `You are an elite YouTube Shorts SEO strategist for the Indian market, writing metadata for a content creator's own upload pipeline. This video may be an Indian podcast clip, interview, motivational clip, business/educational discussion, comedy clip, or general entertainment content, in English, Hindi, Hinglish, or another Indian language. ${mediaDescription} Analyze whatever is provided and write metadata engineered to rank in YouTube search/suggested feed AND make a scrolling Indian viewer stop and tap.`;
 
-  const analyzeSection = hasImage
-    ? `Analyze the frames (your ONLY source of truth about what this video actually contains) for:
+  const groundingRule = hasAudio && hasImage
+    ? `1. The audio is ground truth for anything spoken (names, topics, claims, numbers, quotes) and the image is ground truth for anything visual (setting, on-screen text, people, objects). If they conflict, trust whichever medium actually shows/says it. Never use the filename as a source of fact - it is frequently generic batch/source labeling shared across many unrelated videos. If you cannot identify a specific person, brand, number, or claim, do NOT invent one - describe it in general terms instead`
+    : hasAudio
+      ? `1. Base ALL analysis strictly on what is actually said in the audio. Never use the filename as a source of fact - it is frequently generic batch/source labeling shared across many unrelated videos. If you cannot identify a specific person, brand, number, or claim, do NOT invent one - describe it in general terms instead`
+      : hasImage
+        ? `1. Base ALL analysis strictly on what you can actually see in the image. Never use the filename as a source of fact - it is frequently generic batch/source labeling shared across many unrelated videos. If you cannot identify a specific object, brand, number, or price, do NOT name one - describe it in general terms instead`
+        : `1. You have no audio or visual information for this request. The filename is frequently just generic batch/source labeling and very often does NOT describe this specific video's real content - do not confidently assert a topic from it. Write a plausible, generic, honest title/description that could reasonably apply to a short-form video, without inventing specifics`;
+
+  const languageRule = hasAudio
+    ? `\n6. Detect the language actually spoken (English, Hindi, Hinglish, or another Indian language). Write the title, description, and keywords in whatever language/mix Indian viewers searching for this content would naturally type - do not mechanically translate Hindi/Hinglish speech into pure English if that isn't how people would actually search for it`
+    : '';
+
+  const analyzeSection = hasAudio && hasImage
+    ? `Analyze the combined audio + visuals for:
+- What is actually said: key statements, questions, answers, stories, numbers, names, claims, tone, emotion
+- What is actually shown: setting, people, on-screen text, objects, reactions
+- The single most compelling/unique moment (spoken or visual) worth hooking a title around
+- Main topic and target audience
+- Exact phrases Indian viewers would type into YouTube search to find this`
+    : hasAudio
+      ? `Analyze the audio for:
+- What is actually said: key statements, questions, answers, stories, numbers, names, claims, tone, emotion
+- The single most compelling/unique spoken moment worth hooking a title around
+- Main topic and target audience
+- Exact phrases Indian viewers would type into YouTube search to find this`
+      : hasImage
+        ? `Analyze the frames for:
 - Visual content (scenes, objects, activities, people, text/numbers on screen)
 - The single most compelling/unique/specific moment worth hooking a title around
 - Main topic and context
 - Emotional tone and energy
 - Target audience
 - Exact phrases people would type into YouTube search to find this`
-    : `Base your metadata on:
+        : `Base your metadata on:
 - Any niche/context given above (not the filename - it's unreliable, see rule 1)
 - A plausible, generic description of short-form video content, honest about not knowing specifics
 - Exact phrases people would type into YouTube search for content like this`;
@@ -219,30 +282,30 @@ function buildAnalysisPrompt(
 Video filename (unreliable - see rule 1 below): ${filename}${nicheContext}${defaultHashtagsContext}${defaultKeywordsContext}
 
 IMPORTANT RULES:
-${rule1}
+${groundingRule}
 2. Descriptions must be truthful, never deceptive - "optimized for search/virality" means sharper wording and better keyword targeting, not fake claims
 3. Do NOT keyword stuff (unnatural repetition) - but DO use every real, specific, searchable term the content justifies
 4. Do NOT add unrelated trending hashtags/keywords that don't match the actual content
-5. Write everything yourself in your own words - any examples given below illustrate a technique only and must never be copied or adapted verbatim
+5. Write everything yourself in your own words - any examples given below illustrate a technique only and must never be copied or adapted verbatim${languageRule}
 
 TITLE - this is the single biggest lever for views. Requirements:
 - Front-load the single most specific, highest-search-intent phrase in the first 3-5 words (viewers and YouTube's algorithm both weight the start of the title most)
-- Create a genuine curiosity gap or hook (a surprising detail, a specific result, a relatable moment) - never a generic label
-- Prefer concrete and specific over vague and generic - e.g. naming the specific item/action/setting beats a bare category label like "Bundle Unboxing"
+- Create a genuine curiosity gap or hook grounded in the strongest actual moment (a surprising statement, a specific result, a relatable moment) - never a generic label
+- Prefer concrete and specific over vague and generic
 - Natural language a human would actually type into YouTube search, not a robotic label
 - Max 60 characters where possible so it doesn't truncate
 
 DESCRIPTION - the first sentence is shown in search results and must contain the primary keyword phrase naturally:
-- Sentence 1: hook + primary searchable keyword phrase, describing what the video is about
+- Sentence 1: hook + primary searchable keyword phrase, describing what the video is actually about
 - Sentence 2-3: supporting detail/context, naturally working in secondary keywords
 - Final line: soft call-to-action relevant to the content (e.g. a genuine question)
 - Never use placeholder text like "[insert items]" - if a detail isn't known, don't reference it at all
 - Never repeat the title verbatim as a description sentence - write fresh, distinct wording
 
 KEYWORDS & HASHTAGS - optimize for what people actually search, not abstract categories:
-- Prioritize specific multi-word phrases with real search intent (e.g. "podcast starter kit unboxing" beats "ContentCreation")
-- Include a mix: 2-3 broad/high-volume terms for the general topic, plus 5-10 specific/long-tail terms unique to this video
-- Avoid vague single-word tags like "CreativeProcess", "ContentCreation", "Podcasting" unless nothing more specific applies
+- Prioritize specific multi-word phrases with real search intent
+- Include a mix: 2-3 broad/high-volume terms for the general topic, plus 5-10 specific/long-tail terms unique to this video, plus a couple of natural Hindi/Hinglish search terms if the content is in Hindi/Hinglish
+- Avoid vague single-word tags like "Podcast", "Motivation", "Business" unless nothing more specific applies
 - Every keyword/hashtag must independently describe THIS video - never reuse words from the category ID reference list below just because they appear there
 - Include #Shorts hashtag always
 - Generate 5-15 hashtags total, 10-20 keywords total
@@ -256,7 +319,7 @@ Return ONLY valid JSON matching this exact schema, with no other text before or 
   "hashtags": ["#Shorts", "#..."],
   "keywords": ["keyword1", "keyword2"],
   "categoryId": "string (YouTube category ID number)",
-  "pinnedComment": "string or null (optional engaging comment to pin)",
+  "pinnedComment": "string or null (a genuine discussion-provoking question tied to what was actually said/shown)",
   "primaryTopic": "string (main topic in 2-5 words)",
   "secondaryTopics": ["topic1", "topic2"],
   "emotionalTone": "string (e.g. exciting, educational, funny, inspiring, satisfying)",

@@ -57,7 +57,7 @@ export async function extractContactSheet(
 
     const combinedPath = path.join(dir, 'combined.jpg');
     const inputArgs = framePaths.flatMap((p) => ['-i', p]);
-    await execFileAsync('ffmpeg', [
+    await execFileAsync(FFMPEG_BIN, [
       ...inputArgs,
       '-filter_complex', `hstack=inputs=${framePaths.length}`,
       '-q:v', '5',
@@ -66,6 +66,48 @@ export async function extractContactSheet(
 
     const combinedBuffer = await readFile(combinedPath);
     return { base64: combinedBuffer.toString('base64'), mimeType: 'image/jpeg' };
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Extracts the audio track as 16kHz mono WAV for speech transcription.
+ * Returns null if the video has no audio stream at all (silent clips).
+ */
+export async function extractAudioTrack(
+  videoBuffer: Buffer
+): Promise<{ base64: string; mimeType: string } | null> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'yts-audio-'));
+  const inputPath = path.join(dir, 'input.mp4');
+
+  try {
+    await writeFile(inputPath, videoBuffer);
+
+    // Check for an audio stream before attempting extraction
+    const { stdout } = await execFileAsync(FFPROBE_BIN, [
+      '-v', 'error',
+      '-select_streams', 'a',
+      '-show_entries', 'stream=index',
+      '-of', 'csv=p=0',
+      inputPath,
+    ]);
+    if (!stdout.trim()) return null;
+
+    const audioPath = path.join(dir, 'audio.wav');
+    await execFileAsync(FFMPEG_BIN, [
+      '-i', inputPath,
+      '-vn',
+      '-ar', '16000',
+      '-ac', '1',
+      '-c:a', 'pcm_s16le',
+      '-y', audioPath,
+    ]);
+
+    const audioBuffer = await readFile(audioPath);
+    return { base64: audioBuffer.toString('base64'), mimeType: 'audio/wav' };
+  } catch {
+    return null;
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
