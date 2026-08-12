@@ -23,7 +23,10 @@ export async function GET(request: NextRequest) {
 
   // Validate state to prevent CSRF
   if (state !== 'youtube-shorts-auth') {
-    await log('ERROR', 'AUTH', 'Invalid OAuth state parameter - possible CSRF attack');
+    await log('ERROR', 'AUTH', 'Invalid OAuth state parameter - possible CSRF attack', {
+      receivedState: state,
+      url: request.url,
+    });
     return NextResponse.redirect(new URL('/settings?auth_error=invalid_state', request.url));
   }
 
