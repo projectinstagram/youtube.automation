@@ -110,10 +110,14 @@ export async function runScheduler(triggeredBy: 'cron' | 'manual' = 'cron'): Pro
       return result;
     }
 
-    // 9. Get eligible videos
+    // 9. Get eligible videos. A cron run only uploads ONE video per trigger, so that
+    // each configured upload_times slot gets its own video instead of one run dumping
+    // the whole daily quota at once. A manual run still processes up to the full
+    // remaining quota, which is more useful for testing/catch-up.
+    const perRunLimit = triggeredBy === 'cron' ? Math.min(1, remainingToday) : remainingToday;
     const eligibleVideos = await getEligibleVideos(
       settings.selection_strategy,
-      remainingToday,
+      perRunLimit,
       settings.max_retry_attempts
     );
 
@@ -127,8 +131,8 @@ export async function runScheduler(triggeredBy: 'cron' | 'manual' = 'cron'): Pro
 
     // 10. Process each eligible video
     for (const video of eligibleVideos) {
-      if (result.videosUploaded >= remainingToday) {
-        await log('INFO', 'SCHEDULER', 'Daily quota reached during processing, stopping');
+      if (result.videosUploaded >= perRunLimit) {
+        await log('INFO', 'SCHEDULER', 'Per-run upload limit reached, stopping');
         break;
       }
 
