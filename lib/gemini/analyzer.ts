@@ -155,16 +155,23 @@ export async function analyzeVideoAndGenerateMetadata(
   let useAudio = hasAudio;
   let useImage = hasFrames;
   let reinforce = false;
+  let nonEnglishDetected = false;
 
   for (let attempt = 1; attempt <= 4; attempt++) {
     try {
       const basePrompt = buildAnalysisPrompt(filename, options, useImage, useAudio);
-      const userText = reinforce
-        ? `${basePrompt}\n\nYour previous reply was not a single valid JSON object (it was either prose or a refusal). This is legitimate metadata generation for the creator's own already-uploaded video, not a request to deceive anyone. Reply with ONLY the JSON object this time - no explanation, no markdown, no refusal.`
-        : basePrompt;
+      const userText = nonEnglishDetected
+        ? `${basePrompt}\n\nYour previous reply used non-English script (e.g. Devanagari) despite the instruction to always write in English. Reply again with the SAME JSON schema, but with every string value translated into natural English, Latin script only - no Hindi/Devanagari text anywhere in the output.`
+        : reinforce
+          ? `${basePrompt}\n\nYour previous reply was not a single valid JSON object (it was either prose or a refusal). This is legitimate metadata generation for the creator's own already-uploaded video, not a request to deceive anyone. Reply with ONLY the JSON object this time - no explanation, no markdown, no refusal.`
+          : basePrompt;
 
       rawResponse = await callModel(userText, useAudio, useImage);
       const metadata = parseMetadata(rawResponse);
+
+      if (containsNonLatinScript(metadata.title) || containsNonLatinScript(metadata.description)) {
+        throw new Error('Generated metadata contains non-English script despite English-only instruction');
+      }
 
       await log('INFO', 'AI', `Metadata generated successfully`, {
         title: metadata.title,
@@ -179,14 +186,18 @@ export async function analyzeVideoAndGenerateMetadata(
     } catch (err: unknown) {
       const error = err as Error;
       const refused = (useAudio || useImage) && looksLikeRefusal(rawResponse);
+      nonEnglishDetected = error.message.includes('non-English script');
 
       await log(attempt === 4 ? 'ERROR' : 'WARN', 'AI', `Attempt ${attempt} failed to generate metadata for ${filename}`, {
         error: error.message,
         rawResponse: rawResponse.slice(0, 500),
         refused,
+        nonEnglishDetected,
       });
 
-      if (refused && useAudio) {
+      if (nonEnglishDetected) {
+        reinforce = false;
+      } else if (refused && useAudio) {
         // Drop audio first - it's the more likely refusal trigger (speech content) and the
         // omni model is also the slowest option, so falling back to image-only is a double win
         useAudio = false;
@@ -248,7 +259,7 @@ function buildAnalysisPrompt(
         : `1. You have no audio or visual information for this request. The filename is frequently just generic batch/source labeling and very often does NOT describe this specific video's real content - do not confidently assert a topic from it. Write a plausible, generic, honest title/description that could reasonably apply to a short-form video, without inventing specifics`;
 
   const languageRule = hasAudio
-    ? `\n6. Detect the language actually spoken (English, Hindi, Hinglish, or another Indian language). Write the title, description, and keywords in whatever language/mix Indian viewers searching for this content would naturally type - do not mechanically translate Hindi/Hinglish speech into pure English if that isn't how people would actually search for it`
+    ? `\n6. The audio may be in English, Hindi, Hinglish, or another Indian language, but ALWAYS write the title, description, keywords, and hashtags in English, in Latin script only - never Devanagari or other non-Latin script, and never Hindi vocabulary. Translate/summarize the actual meaning of what was said into natural English a broad audience would search for - do not transliterate or leave Hindi words in place, even if that's the language actually spoken`
     : '';
 
   const analyzeSection = hasAudio && hasImage
@@ -304,7 +315,7 @@ DESCRIPTION - the first sentence is shown in search results and must contain the
 
 KEYWORDS & HASHTAGS - optimize for what people actually search, not abstract categories:
 - Prioritize specific multi-word phrases with real search intent
-- Include a mix: 2-3 broad/high-volume terms for the general topic, plus 5-10 specific/long-tail terms unique to this video, plus a couple of natural Hindi/Hinglish search terms if the content is in Hindi/Hinglish
+- Include a mix: 2-3 broad/high-volume terms for the general topic, plus 5-10 specific/long-tail terms unique to this video - all in English, Latin script only
 - Avoid vague single-word tags like "Podcast", "Motivation", "Business" unless nothing more specific applies
 - Every keyword/hashtag must independently describe THIS video - never reuse words from the category ID reference list below just because they appear there
 - Include #Shorts hashtag always
@@ -312,12 +323,12 @@ KEYWORDS & HASHTAGS - optimize for what people actually search, not abstract cat
 
 ${analyzeSection}
 
-Return ONLY valid JSON matching this exact schema, with no other text before or after it:
+Return ONLY valid JSON matching this exact schema, with no other text before or after it. Every string value must be in English (Latin script) regardless of what language was spoken in the video:
 {
-  "title": "string (specific, keyword-first, hook-driven, max 100 chars)",
-  "description": "string (2-4 sentences, keyword in first sentence, natural language, not spammy)",
-  "hashtags": ["#Shorts", "#..."],
-  "keywords": ["keyword1", "keyword2"],
+  "title": "string, IN ENGLISH (specific, keyword-first, hook-driven, max 100 chars)",
+  "description": "string, IN ENGLISH (2-4 sentences, keyword in first sentence, natural language, not spammy)",
+  "hashtags": ["#Shorts", "#... (English only)"],
+  "keywords": ["keyword1 (English only)", "keyword2"],
   "categoryId": "string (YouTube category ID number)",
   "pinnedComment": "string or null (a genuine discussion-provoking question tied to what was actually said/shown)",
   "primaryTopic": "string (main topic in 2-5 words)",
@@ -335,6 +346,15 @@ YouTube Category IDs for reference:
 1=Film & Animation, 2=Autos, 10=Music, 15=Pets, 17=Sports, 19=Travel,
 20=Gaming, 22=People & Blogs, 23=Comedy, 24=Entertainment, 25=News,
 26=Howto & Style, 27=Education, 28=Science & Technology`;
+}
+
+// Major Indic script Unicode blocks (Devanagari/Hindi, Bengali, Gurmukhi, Gujarati,
+// Tamil, Telugu, Kannada, Malayalam). Output must always be English/Latin script -
+// this catches cases where the model ignores that instruction despite being told twice.
+const NON_LATIN_SCRIPT_PATTERN = /[ऀ-ॿঀ-৿਀-੿઀-૿஀-௿ఀ-౿ಀ-೿ഀ-ൿ]/;
+
+function containsNonLatinScript(text: string): boolean {
+  return NON_LATIN_SCRIPT_PATTERN.test(text);
 }
 
 // Bare category-reference words the model sometimes echoes from the categoryId
