@@ -2,15 +2,13 @@ import { NextRequest, NextResponse } from 'next/server';
 import {
   getActiveDriveSource,
   getActiveYouTubeAccount,
-  upsertVideoFromDrive,
-  updateDriveSourceSyncTime,
   upsertDriveSource,
   updateSettings,
   log,
 } from '@/lib/db/operations';
 import { getAuthenticatedClient, decryptToken } from '@/lib/google/auth';
-import { parseFolderIdFromUrl } from '@/lib/google/drive';
-import { listAllVideosInFolder, validateDriveFolder } from '@/lib/google/drive';
+import { parseFolderIdFromUrl, validateDriveFolder } from '@/lib/google/drive';
+import { syncDriveFolder } from '@/lib/scheduler/sync';
 import { z } from 'zod';
 
 const SyncBodySchema = z.object({
@@ -85,50 +83,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // List all videos in the folder
-    await log('INFO', 'DRIVE', `Syncing Drive folder: ${folderId}`);
-    const files = await listAllVideosInFolder(auth, folderId);
-
-    await log('INFO', 'DRIVE', `Found ${files.length} video files in Drive folder`);
-
-    // Upsert each file into the database
-    let newCount = 0;
-    let existingCount = 0;
-    let duplicateCount = 0;
-
-    for (const file of files) {
-      const { isNew, isDuplicate } = await upsertVideoFromDrive(
-        file.id,
-        file.name,
-        file.mimeType,
-        file.size ? parseInt(file.size, 10) : undefined,
-        driveSource?.id
-      );
-
-      if (isDuplicate) duplicateCount++;
-      else if (isNew) newCount++;
-      else existingCount++;
-    }
-
-    // Update sync metadata
-    if (driveSource) {
-      await updateDriveSourceSyncTime(driveSource.id, files.length);
-    }
-
-    await log('INFO', 'DRIVE', `Sync complete: ${newCount} new, ${existingCount} existing, ${duplicateCount} duplicates skipped`, {
-      folderId,
-      totalFiles: files.length,
-    });
+    const result = await syncDriveFolder(auth, driveSource);
 
     return NextResponse.json({
       success: true,
       data: {
-        totalFiles: files.length,
-        newVideos: newCount,
-        existingVideos: existingCount,
-        duplicatesSkipped: duplicateCount,
+        ...result,
         folderId,
-        folderName: driveSource?.folder_name,
+        folderName: driveSource.folder_name,
       },
     });
   } catch (err: unknown) {

@@ -16,6 +16,7 @@ import {
 } from '@/lib/db/operations';
 import { getAuthenticatedClient, decryptToken } from '@/lib/google/auth';
 import { getDriveFileStream, downloadDriveFile, checkDriveFileExists } from '@/lib/google/drive';
+import { syncDriveFolder } from '@/lib/scheduler/sync';
 import { analyzeVideoAndGenerateMetadata } from '@/lib/gemini/analyzer';
 import { uploadVideoToYouTube, verifyYouTubeVideo, checkYouTubeQuota } from '@/lib/youtube/upload';
 import { sendNotification } from '@/lib/notifications';
@@ -101,6 +102,19 @@ export async function runScheduler(triggeredBy: 'cron' | 'manual' = 'cron'): Pro
         await updateYouTubeTokens(account.id, newAccessToken, expiry);
       }
     );
+
+    // 7b. Sync the Drive folder so newly added videos are discovered automatically,
+    // without requiring someone to click "Sync Drive" by hand. A sync failure here
+    // shouldn't abort the run - fall back to whatever's already queued.
+    try {
+      const syncResult = await syncDriveFolder(auth, driveSource);
+      if (syncResult.newVideos > 0) {
+        await log('INFO', 'SCHEDULER', `Auto-discovered ${syncResult.newVideos} new video(s) from Drive`);
+      }
+    } catch (err: unknown) {
+      const error = err as Error;
+      await log('WARN', 'SCHEDULER', `Drive auto-sync failed, continuing with existing queue: ${error.message}`);
+    }
 
     // 8. Check YouTube quota
     const hasQuota = await checkYouTubeQuota(auth);
