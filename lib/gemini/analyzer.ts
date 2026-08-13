@@ -208,6 +208,7 @@ export async function analyzeVideoAndGenerateMetadata(
     initialMetadata: GeneratedMetadata
   ): Promise<GeneratedMetadata | null> => {
     let current = initialMetadata;
+    let revised = false;
 
     for (let round = 1; round <= 2; round++) {
       let verification;
@@ -216,7 +217,9 @@ export async function analyzeVideoAndGenerateMetadata(
       } catch (err: unknown) {
         // Verifier infrastructure itself failed (not a rejection) - don't let a transient
         // verifier outage force every video into filename-fallback mode, but make the
-        // skip clearly visible in logs rather than silently treating it as approved.
+        // skip clearly visible in logs rather than silently treating it as approved. No
+        // verification result is attached, so the dashboard can tell "unverified" apart
+        // from "verified and passed".
         await log('WARN', 'AI', `Verifier unavailable for ${filename}, proceeding without verification for this run`, {
           error: (err as Error).message,
         });
@@ -224,7 +227,16 @@ export async function analyzeVideoAndGenerateMetadata(
       }
 
       if (verification.approved && verification.invalidKeywords.length === 0) {
-        return current;
+        return {
+          ...current,
+          verification: {
+            approved: true,
+            overallScore: verification.overallScore,
+            issues: verification.issues,
+            invalidKeywords: [],
+            revised,
+          },
+        };
       }
 
       if (round === 2) {
@@ -238,6 +250,7 @@ export async function analyzeVideoAndGenerateMetadata(
       try {
         const revisionRaw = await callRevisionModel(buildRevisionPrompt(evidence, current, verification));
         current = parseRevision(revisionRaw);
+        revised = true;
       } catch (err: unknown) {
         await log('WARN', 'AI', `Revision attempt failed for ${filename}`, { error: (err as Error).message });
         return null;

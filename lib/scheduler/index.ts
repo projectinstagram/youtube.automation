@@ -270,6 +270,11 @@ async function processVideo(
       searchability_score: metadata.searchabilityScore,
       spam_risk: metadata.spamRisk,
       model_used: settings.ai_model,
+      verification_approved: metadata.verification?.approved ?? null,
+      verification_score: metadata.verification?.overallScore ?? null,
+      verification_issues: metadata.verification?.issues ?? [],
+      verification_invalid_keywords: metadata.verification?.invalidKeywords ?? [],
+      verification_revised: metadata.verification?.revised ?? false,
     });
 
     // -------- STEP 4: DRY RUN CHECK --------

@@ -102,6 +102,11 @@ export interface AIMetadata {
   searchability_score?: number;
   spam_risk?: number;
   model_used?: string;
+  verification_approved?: boolean | null;
+  verification_score?: number | null;
+  verification_issues?: string[];
+  verification_invalid_keywords?: { keyword: string; reason: string }[];
+  verification_revised?: boolean;
   generated_at: string;
   created_at: string;
 }
@@ -201,6 +206,16 @@ export interface GeneratedMetadata {
   relevanceScore: number;
   searchabilityScore: number;
   spamRisk: number;
+  // Populated by the independent verification pass, when one actually ran (there's
+  // nothing to verify against for pure filename-fallback metadata). Not sent to
+  // YouTube - only used for persisting/displaying verification results.
+  verification?: {
+    approved: boolean;
+    overallScore: number;
+    issues: string[];
+    invalidKeywords: { keyword: string; reason: string }[];
+    revised: boolean;
+  };
 }
 
 // ============================================================

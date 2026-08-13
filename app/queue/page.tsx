@@ -12,6 +12,9 @@ import {
   CheckCircle2,
   Clock,
   Brain,
+  ShieldCheck,
+  ShieldAlert,
+  ShieldQuestion,
 } from 'lucide-react';
 import { formatDistanceToNow, format } from 'date-fns';
 import type { Video, AIMetadata, VideoStatus } from '@/types';
@@ -143,7 +146,7 @@ export default function QueuePage() {
               <table className="w-full">
                 <thead className="border-b border-gray-800">
                   <tr>
-                    {['Filename', 'Status', 'AI Score', 'YouTube', 'Attempts', 'Discovered', 'Uploaded'].map((h) => (
+                    {['Filename', 'Status', 'Verified', 'AI Score', 'YouTube', 'Attempts', 'Discovered', 'Uploaded'].map((h) => (
                       <th
                         key={h}
                         className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wide"
@@ -175,6 +178,21 @@ export default function QueuePage() {
                       </td>
                       <td className="px-4 py-3">
                         <StatusBadge status={video.status} />
+                      </td>
+                      <td className="px-4 py-3">
+                        {video.ai_metadata?.verification_approved === true ? (
+                          <ShieldCheck className="w-4 h-4 text-green-400" aria-label="Verified">
+                            <title>Verified</title>
+                          </ShieldCheck>
+                        ) : video.ai_metadata?.verification_approved === false ? (
+                          <ShieldAlert className="w-4 h-4 text-red-400" aria-label="Rejected">
+                            <title>Rejected</title>
+                          </ShieldAlert>
+                        ) : (
+                          <ShieldQuestion className="w-4 h-4 text-gray-600" aria-label="Not verified">
+                            <title>Not verified</title>
+                          </ShieldQuestion>
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         {video.ai_metadata?.metadata_score !== undefined ? (
@@ -328,6 +346,51 @@ export default function QueuePage() {
                       <p className="text-xs text-gray-600 mt-2">
                         AI Confidence: {Math.round((selected.ai_metadata.confidence || 0) * 100)}%
                         {selected.ai_metadata.model_used && ` · ${selected.ai_metadata.model_used}`}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {selected.ai_metadata && (
+                  <div className="border border-gray-800 rounded-lg p-4 mt-4">
+                    <h3 className="text-sm font-semibold text-gray-300 mb-3 flex items-center gap-2">
+                      {selected.ai_metadata.verification_approved === true ? (
+                        <ShieldCheck className="w-4 h-4 text-green-400" />
+                      ) : selected.ai_metadata.verification_approved === false ? (
+                        <ShieldAlert className="w-4 h-4 text-red-400" />
+                      ) : (
+                        <ShieldQuestion className="w-4 h-4 text-gray-500" />
+                      )}
+                      Independent Verification
+                    </h3>
+
+                    {selected.ai_metadata.verification_approved === true ? (
+                      <>
+                        <p className="text-xs text-green-400 mb-2">
+                          Verified by a second model {selected.ai_metadata.verification_revised && '(after 1 revision)'}
+                          {selected.ai_metadata.verification_score !== null && selected.ai_metadata.verification_score !== undefined &&
+                            ` · score ${selected.ai_metadata.verification_score}/100`}
+                        </p>
+                        {selected.ai_metadata.verification_issues && selected.ai_metadata.verification_issues.length > 0 && (
+                          <ul className="text-xs text-gray-500 list-disc list-inside space-y-0.5">
+                            {selected.ai_metadata.verification_issues.map((issue, i) => <li key={i}>{issue}</li>)}
+                          </ul>
+                        )}
+                      </>
+                    ) : selected.ai_metadata.verification_approved === false ? (
+                      <>
+                        <p className="text-xs text-red-400 mb-2">Rejected by independent verification - this metadata should not have uploaded</p>
+                        {selected.ai_metadata.verification_invalid_keywords && selected.ai_metadata.verification_invalid_keywords.length > 0 && (
+                          <ul className="text-xs text-gray-500 list-disc list-inside space-y-0.5">
+                            {selected.ai_metadata.verification_invalid_keywords.map((k, i) => (
+                              <li key={i}><span className="text-gray-400">{k.keyword}</span>: {k.reason}</li>
+                            ))}
+                          </ul>
+                        )}
+                      </>
+                    ) : (
+                      <p className="text-xs text-gray-500">
+                        Not independently verified (no audio/visual evidence available, or the verifier was unavailable for this run)
                       </p>
                     )}
                   </div>
