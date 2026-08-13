@@ -140,8 +140,16 @@ export async function updateYouTubeVideoMetadata(
   });
 }
 
+const VERIFY_RETRY_DELAYS_MS = [3_000, 6_000, 12_000];
+
 /**
- * Verifies a YouTube video exists and is processing.
+ * Verifies a YouTube video exists and is processing. Retries with backoff
+ * before concluding a video doesn't exist - videos.list can lag behind a
+ * just-completed videos.insert by several seconds (observed in production:
+ * an upload that returned a valid video ID came back "not found" on an
+ * immediate single check), and a false negative here causes the pipeline to
+ * treat a video that's actually live as failed and re-upload it as a
+ * duplicate on the next run.
  */
 export async function verifyYouTubeVideo(
   auth: OAuth2Client,
@@ -149,24 +157,31 @@ export async function verifyYouTubeVideo(
 ): Promise<{ exists: boolean; status?: string; title?: string }> {
   const youtube = google.youtube({ version: 'v3', auth });
 
-  try {
-    const res = await youtube.videos.list({
-      part: ['snippet', 'status'],
-      id: [videoId],
-    });
+  for (let attempt = 0; attempt <= VERIFY_RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      const res = await youtube.videos.list({
+        part: ['snippet', 'status'],
+        id: [videoId],
+      });
 
-    const video = res.data.items?.[0];
-    if (!video) return { exists: false };
+      const video = res.data.items?.[0];
+      if (video) {
+        return {
+          exists: true,
+          status: video.status?.uploadStatus ?? undefined,
+          title: video.snippet?.title ?? undefined,
+        };
+      }
+    } catch (err) {
+      await log('WARN', 'YOUTUBE', `Failed to verify video ${videoId} (attempt ${attempt + 1})`, { error: (err as Error).message });
+    }
 
-    return {
-      exists: true,
-      status: video.status?.uploadStatus ?? undefined,
-      title: video.snippet?.title ?? undefined,
-    };
-  } catch (err) {
-    await log('WARN', 'YOUTUBE', `Failed to verify video ${videoId}`, { error: (err as Error).message });
-    return { exists: false };
+    if (attempt < VERIFY_RETRY_DELAYS_MS.length) {
+      await new Promise((resolve) => setTimeout(resolve, VERIFY_RETRY_DELAYS_MS[attempt]));
+    }
   }
+
+  return { exists: false };
 }
 
 /**
