@@ -39,6 +39,9 @@ export async function analyzeVideoAndGenerateMetadata(
     categoryId?: string;
     aiModel?: string;
     temperature?: number;
+    maxKeywords?: number;
+    maxHashtags?: number;
+    titleStyle?: 'curiosity_with_accuracy' | 'direct_and_clear' | 'bold_statement' | 'question_based';
   } = {}
 ): Promise<GeneratedMetadata> {
   const apiKey = requireEnv('NVIDIA_API_KEY');
@@ -346,6 +349,13 @@ export async function analyzeVideoAndGenerateMetadata(
   return generateFallbackMetadata(filename, options);
 }
 
+const TITLE_STYLE_GUIDANCE: Record<string, string> = {
+  curiosity_with_accuracy: 'Create a genuine curiosity gap or hook grounded in the strongest actual moment (a surprising statement, a specific result, a relatable moment) - never a generic label.',
+  direct_and_clear: 'State plainly and specifically what the video is about - clarity over cleverness, no curiosity-gap withholding.',
+  bold_statement: 'Lead with the single boldest, most attention-grabbing true statement the content actually supports - confident, declarative tone.',
+  question_based: 'Frame the title as a genuine question the video actually answers, phrased the way someone would search it.',
+};
+
 function buildAnalysisPrompt(
   filename: string,
   options: {
@@ -353,10 +363,16 @@ function buildAnalysisPrompt(
     defaultHashtags?: string[];
     defaultKeywords?: string[];
     categoryId?: string;
+    maxKeywords?: number;
+    maxHashtags?: number;
+    titleStyle?: string;
   },
   hasImage: boolean,
   hasAudio: boolean
 ): string {
+  const maxKeywords = options.maxKeywords || 20;
+  const maxHashtags = options.maxHashtags || 15;
+  const titleStyleGuidance = TITLE_STYLE_GUIDANCE[options.titleStyle || 'curiosity_with_accuracy'];
   const nicheContext = options.nicheDescription
     ? `\n\nChannel niche/topic: ${options.nicheDescription}`
     : '';
@@ -432,7 +448,7 @@ ${groundingRule}
 
 TITLE - this is the single biggest lever for views. Requirements:
 - Front-load the single most specific, highest-search-intent phrase in the first 3-5 words (viewers and YouTube's algorithm both weight the start of the title most)
-- Create a genuine curiosity gap or hook grounded in the strongest actual moment (a surprising statement, a specific result, a relatable moment) - never a generic label
+- ${titleStyleGuidance}
 - Prefer concrete and specific over vague and generic
 - Natural language a human would actually type into YouTube search, not a robotic label
 - Max 60 characters where possible so it doesn't truncate
@@ -450,7 +466,7 @@ KEYWORDS & HASHTAGS - optimize for what people actually search, not abstract cat
 - Avoid vague single-word tags like "Podcast", "Motivation", "Business" unless nothing more specific applies
 - Every keyword/hashtag must independently describe THIS video - never reuse words from the category ID reference list below just because they appear there
 - Include #Shorts hashtag always
-- Generate 5-15 hashtags total, 10-20 keywords total
+- Generate up to ${maxHashtags} hashtags total, up to ${maxKeywords} keywords total - fewer is fine if the content doesn't justify more, never pad to hit the count
 
 ${analyzeSection}
 
@@ -516,6 +532,8 @@ function validateAndNormalizeMetadata(
   options: {
     defaultHashtags?: string[];
     defaultKeywords?: string[];
+    maxKeywords?: number;
+    maxHashtags?: number;
   }
 ): GeneratedMetadata {
   // Ensure #Shorts is always included, drop leaked category-reference words, dedupe
@@ -535,8 +553,8 @@ function validateAndNormalizeMetadata(
     }
   }
 
-  // Limit hashtags to 20
-  hashtags = hashtags.slice(0, 20);
+  // Limit hashtags to the channel-configured max (default 15)
+  hashtags = hashtags.slice(0, options.maxHashtags || 15);
 
   // Merge keywords with defaults, dropping leaked category-reference words and dupes
   let keywords = dedupeCaseInsensitive(
@@ -549,7 +567,8 @@ function validateAndNormalizeMetadata(
       if (!keywords.some((k) => k.toLowerCase() === dk.toLowerCase())) keywords.push(dk);
     }
   }
-  keywords = keywords.slice(0, 500); // YouTube tag limit is ~500 chars total
+  // Limit keywords to the channel-configured max (default 20)
+  keywords = keywords.slice(0, options.maxKeywords || 20);
 
   // Sanitize title
   const title = typeof raw.title === 'string'

@@ -505,6 +505,45 @@ export default function SettingsPage() {
                 save({ default_keywords: updated });
               }}
             />
+
+            <div className="grid grid-cols-3 gap-4 mt-4">
+              <div>
+                <label className="block text-xs text-gray-500 mb-1.5">Title Style</label>
+                <select
+                  value={settings.title_style}
+                  onChange={(e) => setSettings({ ...settings, title_style: e.target.value as typeof settings.title_style })}
+                  onBlur={() => save({ title_style: settings.title_style })}
+                  className="w-full px-3 py-2 text-sm bg-gray-800 border border-gray-700 rounded-lg text-gray-300 focus:outline-none"
+                >
+                  <option value="curiosity_with_accuracy">Curiosity hook</option>
+                  <option value="direct_and_clear">Direct & clear</option>
+                  <option value="bold_statement">Bold statement</option>
+                  <option value="question_based">Question-based</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1.5">Max Keywords</label>
+                <select
+                  value={settings.max_keywords}
+                  onChange={(e) => setSettings({ ...settings, max_keywords: parseInt(e.target.value) })}
+                  onBlur={() => save({ max_keywords: settings.max_keywords })}
+                  className="w-full px-3 py-2 text-sm bg-gray-800 border border-gray-700 rounded-lg text-gray-300 focus:outline-none"
+                >
+                  {[5, 10, 15, 20, 30, 50].map((n) => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1.5">Max Hashtags</label>
+                <select
+                  value={settings.max_hashtags}
+                  onChange={(e) => setSettings({ ...settings, max_hashtags: parseInt(e.target.value) })}
+                  onBlur={() => save({ max_hashtags: settings.max_hashtags })}
+                  className="w-full px-3 py-2 text-sm bg-gray-800 border border-gray-700 rounded-lg text-gray-300 focus:outline-none"
+                >
+                  {[5, 10, 15, 20, 30].map((n) => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </div>
+            </div>
           </Section>
 
           {/* ---- NOTIFICATIONS ---- */}

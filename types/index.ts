@@ -14,6 +14,7 @@ export type VideoStatus =
 
 export type PrivacyStatus = 'public' | 'unlisted' | 'private';
 export type SelectionStrategy = 'FIFO' | 'RANDOM' | 'MANUAL_PRIORITY';
+export type TitleStyle = 'curiosity_with_accuracy' | 'direct_and_clear' | 'bold_statement' | 'question_based';
 export type JobStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
 export type LogLevel = 'INFO' | 'WARN' | 'ERROR' | 'DEBUG';
 export type LogComponent =
@@ -157,6 +158,9 @@ export interface AutomationSettings {
   ai_model: string;
   ai_creativity: number;
   upload_count_reset_at?: string | null;
+  max_keywords: number;
+  max_hashtags: number;
+  title_style: TitleStyle;
   notify_email?: string;
   notify_on_success: boolean;
   notify_on_failure: boolean;

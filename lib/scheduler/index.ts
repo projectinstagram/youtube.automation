@@ -247,6 +247,9 @@ async function processVideo(
       categoryId: settings.category_id,
       aiModel: settings.ai_model,
       temperature: settings.ai_creativity,
+      maxKeywords: settings.max_keywords,
+      maxHashtags: settings.max_hashtags,
+      titleStyle: settings.title_style,
     });
 
     // Save AI metadata to DB
