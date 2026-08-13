@@ -422,6 +422,10 @@ function buildAnalysisPrompt(
     ? `\n6. The audio may be in English, Hindi, Hinglish, or another Indian language, but ALWAYS write the title, description, keywords, and hashtags in English, in Latin script only - never Devanagari or other non-Latin script, and never Hindi vocabulary. Translate/summarize the actual meaning of what was said into natural English a broad audience would search for - do not transliterate or leave Hindi words in place, even if that's the language actually spoken`
     : '';
 
+  const ocrCautionRule = hasImage
+    ? `\n7. Reading small/exact on-screen text (precise prices, exact brand spelling, verbatim captions) from a still frame is unreliable - only report specific on-screen text if it is large, clear, and you are genuinely confident, and never invent plausible-sounding text to fill in something you can't actually read clearly. When uncertain, describe the general presence of text/graphics without quoting invented specifics`
+    : '';
+
   const analyzeSection = hasAudio && hasImage
     ? `Analyze the combined audio + visuals for:
 - What is actually said: key statements, questions, answers, stories, numbers, names, claims, tone, emotion
@@ -457,7 +461,7 @@ ${groundingRule}
 2. Descriptions must be truthful, never deceptive - "optimized for search/virality" means sharper wording and better keyword targeting, not fake claims
 3. Do NOT keyword stuff (unnatural repetition) - but DO use every real, specific, searchable term the content justifies
 4. Do NOT add unrelated trending hashtags/keywords that don't match the actual content
-5. Write everything yourself in your own words - any examples given below illustrate a technique only and must never be copied or adapted verbatim${languageRule}
+5. Write everything yourself in your own words - any examples given below illustrate a technique only and must never be copied or adapted verbatim${languageRule}${ocrCautionRule}
 
 TITLE - this is the single biggest lever for views. Requirements:
 - Front-load the single most specific, highest-search-intent phrase in the first 3-5 words (viewers and YouTube's algorithm both weight the start of the title most)
