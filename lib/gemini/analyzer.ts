@@ -441,7 +441,7 @@ function buildAnalysisPrompt(
     : hasAudio
       ? `1. Base ALL analysis strictly on what is actually said in the audio. Never use the filename as a source of fact - it is frequently generic batch/source labeling shared across many unrelated videos. If you cannot identify a specific person, brand, number, or claim, do NOT invent one - describe it in general terms instead`
       : hasImage
-        ? `1. Base ALL analysis strictly on what you can actually see in the image. Never use the filename as a source of fact - it is frequently generic batch/source labeling shared across many unrelated videos. If you cannot identify a specific object, brand, number, or price, do NOT name one - describe it in general terms instead`
+        ? `1. Base ALL analysis strictly on what you can actually see in the image. Never use the filename as a source of fact - it is frequently generic batch/source labeling shared across many unrelated videos. If you cannot identify a specific object, brand, number, or price, do NOT name one - describe it in general terms instead. Critically: you have NO audio, so you cannot know what is actually being said, discussed, taught, or argued - never invent keywords, topics, tips, strategies, or claims about spoken subject matter (e.g. "podcast growth tips", "relationship advice", "marketing strategies") since none of that is visible. Keep every topic/keyword claim to what the visual format and setting alone can support (e.g. "two people talking on a podcast set" is fine, "podcast growth strategies" is not, since that names a specific discussion topic you cannot see)`
         : `1. You have no audio or visual information for this request. The filename is frequently just generic batch/source labeling and very often does NOT describe this specific video's real content - do not confidently assert a topic from it. Write a plausible, generic, honest title/description that could reasonably apply to a short-form video, without inventing specifics`;
 
   const languageRule = hasAudio
@@ -509,7 +509,7 @@ KEYWORDS & HASHTAGS - optimize for what people actually search, not abstract cat
 - Avoid vague single-word tags like "Podcast", "Motivation", "Business" unless nothing more specific applies
 - Every keyword/hashtag must independently describe THIS video - never reuse words from the category ID reference list below just because they appear there
 - Include #Shorts hashtag always
-- Generate up to ${maxHashtags} hashtags total, up to ${maxKeywords} keywords total - fewer is fine if the content doesn't justify more, never pad to hit the count
+- Generate up to ${maxHashtags} hashtags total, up to ${maxKeywords} keywords total - fewer is fine if the content doesn't justify more, never pad to hit the count${hasAudio ? '' : hasImage ? '\n- No audio is available: every keyword must be verifiable from the image alone. Do NOT include keywords naming a specific discussion topic, tip, or strategy (e.g. "growth tips", "content strategy", "marketing secrets") - those require hearing what was said. Stick to what the visual format/setting shows (e.g. "Indian podcast setup", "two person interview")' : ''}
 
 ${analyzeSection}
 
