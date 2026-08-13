@@ -140,6 +140,17 @@ export async function updateDriveSourceSyncTime(sourceId: string, count: number)
 // VIDEOS
 // ============================================================
 
+// Lets the Drive sync skip its per-file existence check for files it already
+// knows about (the overwhelming majority on every run) with a single bulk
+// query instead of one sequential round-trip per file - with hundreds of
+// files that per-file check alone was taking minutes and starving the actual
+// upload step of its time budget within the scheduler's serverless timeout.
+export async function getKnownDriveFileIds(): Promise<Set<string>> {
+  const { data, error } = await supabase.from('videos').select('drive_file_id').limit(20_000);
+  if (error) throw new Error(`Failed to fetch known drive file ids: ${error.message}`);
+  return new Set((data || []).map((r) => r.drive_file_id).filter((id): id is string => !!id));
+}
+
 export async function upsertVideoFromDrive(driveFileId: string, filename: string, mimeType: string, sizeBytes?: number, driveSourceId?: string): Promise<{ video: Video; isNew: boolean; isDuplicate: boolean }> {
   const { data: existing } = await supabase.from('videos').select('*').eq('drive_file_id', driveFileId).maybeSingle();
   if (existing) return { video: existing as Video, isNew: false, isDuplicate: false };

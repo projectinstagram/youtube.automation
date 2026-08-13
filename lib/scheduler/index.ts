@@ -30,7 +30,15 @@ import type { SchedulerRunResult, AutomationSettings, Video } from '@/types';
 // MAIN SCHEDULER ENTRY POINT
 // ============================================================
 
+// vercel.json caps this route at maxDuration: 300s - reserve enough of that
+// for the actual analyze+upload step (observed to take up to ~3 min when the
+// AI model is degraded and retries) so a slow Drive sync or repair pass can't
+// silently eat the whole budget and leave nothing for the scheduled upload.
+const MAX_RUNTIME_MS = 280_000;
+const MIN_UPLOAD_BUDGET_MS = 150_000;
+
 export async function runScheduler(triggeredBy: 'cron' | 'manual' = 'cron'): Promise<SchedulerRunResult> {
+  const schedulerStartedAt = Date.now();
   const cronRunId = uuidv4();
   const result: SchedulerRunResult = {
     cronRunId,
@@ -132,14 +140,24 @@ export async function runScheduler(triggeredBy: 'cron' | 'manual' = 'cron'): Pro
     // (e.g. the AI pipeline was degraded at upload time). Runs regardless of whether
     // there's a new video to upload this cycle - it's fixing history, not uploading -
     // so it must happen before the "no eligible videos" early return below, not after.
-    try {
-      const repairResult = await repairRecentMetadata(auth, settings);
-      if (repairResult.attempted > 0) {
-        await log('INFO', 'SCHEDULER', `Metadata repair pass: ${repairResult.repaired}/${repairResult.attempted} video(s) updated`);
+    // Skipped if too little time budget remains, so a slow sync or a degraded AI
+    // model doesn't consume the whole run and leave nothing for the actual
+    // scheduled upload below (this happened in practice: repair alone took several
+    // minutes retrying a degraded model and the run got killed by Vercel's timeout
+    // before ever reaching the new video).
+    const elapsedBeforeRepair = Date.now() - schedulerStartedAt;
+    if (elapsedBeforeRepair > MAX_RUNTIME_MS - MIN_UPLOAD_BUDGET_MS) {
+      await log('WARN', 'SCHEDULER', `Skipping metadata repair pass to preserve time budget for the scheduled upload (${Math.round(elapsedBeforeRepair / 1000)}s already elapsed)`);
+    } else {
+      try {
+        const repairResult = await repairRecentMetadata(auth, settings);
+        if (repairResult.attempted > 0) {
+          await log('INFO', 'SCHEDULER', `Metadata repair pass: ${repairResult.repaired}/${repairResult.attempted} video(s) updated`);
+        }
+      } catch (err: unknown) {
+        const error = err as Error;
+        await log('WARN', 'SCHEDULER', `Metadata repair pass failed, continuing: ${error.message}`);
       }
-    } catch (err: unknown) {
-      const error = err as Error;
-      await log('WARN', 'SCHEDULER', `Metadata repair pass failed, continuing: ${error.message}`);
     }
 
     // 9. Get eligible videos. A cron run only uploads ONE video per trigger, so that

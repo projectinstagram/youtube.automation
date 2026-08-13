@@ -1,6 +1,6 @@
 import type { OAuth2Client } from 'google-auth-library';
 import { listAllVideosInFolder } from '@/lib/google/drive';
-import { upsertVideoFromDrive, updateDriveSourceSyncTime, log } from '@/lib/db/operations';
+import { upsertVideoFromDrive, updateDriveSourceSyncTime, getKnownDriveFileIds, log } from '@/lib/db/operations';
 import type { DriveSource } from '@/types';
 
 export interface DriveSyncResult {
@@ -21,11 +21,21 @@ export async function syncDriveFolder(auth: OAuth2Client, driveSource: DriveSour
   const files = await listAllVideosInFolder(auth, driveSource.folder_id);
   await log('INFO', 'DRIVE', `Found ${files.length} video files in Drive folder`);
 
+  // One bulk lookup instead of a per-file existence check - the vast majority
+  // of files on any given run are already-known, so this turns what used to
+  // be hundreds of sequential DB round-trips into one.
+  const knownIds = await getKnownDriveFileIds();
+
   let newCount = 0;
   let existingCount = 0;
   let duplicateCount = 0;
 
   for (const file of files) {
+    if (knownIds.has(file.id)) {
+      existingCount++;
+      continue;
+    }
+
     const { isNew, isDuplicate } = await upsertVideoFromDrive(
       file.id,
       file.name,
