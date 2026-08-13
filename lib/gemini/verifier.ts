@@ -1,6 +1,8 @@
 import { log } from '@/lib/db/operations';
 import type { GeneratedMetadata } from '@/types';
+import { fetchWithTimeout } from '@/lib/gemini/fetchWithTimeout';
 
+const VERIFIER_TIMEOUT_MS = 20_000;
 const NVIDIA_CHAT_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
 // Deliberately a different, smaller/faster model than the generator (the omni
 // model or the vision-only model) - independent verification loses much of its
@@ -119,7 +121,7 @@ export async function verifyMetadata(
 ): Promise<VerificationResult> {
   const apiKey = requireEnv('NVIDIA_API_KEY');
 
-  const response = await fetch(NVIDIA_CHAT_URL, {
+  const response = await fetchWithTimeout(NVIDIA_CHAT_URL, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -135,7 +137,7 @@ export async function verifyMetadata(
         { role: 'user', content: buildVerifierPrompt(evidence, metadata) },
       ],
     }),
-  });
+  }, VERIFIER_TIMEOUT_MS);
 
   if (!response.ok) {
     const errText = await response.text();

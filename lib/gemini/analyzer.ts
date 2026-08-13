@@ -4,6 +4,11 @@ import { extractContactSheet, extractAudioTrack } from '@/lib/video/frames';
 import { verifyMetadata, buildRevisionPrompt, type Evidence } from '@/lib/gemini/verifier';
 import { classifyError } from '@/lib/gemini/errors';
 import { isCircuitOpen } from '@/lib/gemini/circuitBreaker';
+import { semanticKeywordCheck } from '@/lib/gemini/embeddings';
+import { fetchWithTimeout } from '@/lib/gemini/fetchWithTimeout';
+
+const GENERATION_TIMEOUT_MS = 45_000;
+const REVISION_TIMEOUT_MS = 20_000;
 
 function requireEnv(key: string): string {
   const val = process.env[key];
@@ -110,7 +115,7 @@ export async function analyzeVideoAndGenerateMetadata(
       content.push({ type: 'image_url', image_url: { url: `data:${frameMimeType};base64,${frameBase64}` } });
     }
 
-    const response = await fetch(NVIDIA_CHAT_URL, {
+    const response = await fetchWithTimeout(NVIDIA_CHAT_URL, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -126,7 +131,7 @@ export async function analyzeVideoAndGenerateMetadata(
           { role: 'user', content },
         ],
       }),
-    });
+    }, GENERATION_TIMEOUT_MS);
 
     if (!response.ok) {
       const errText = await response.text();
@@ -162,7 +167,7 @@ export async function analyzeVideoAndGenerateMetadata(
   // Fast text-only model call, used for the revision pass - no need to re-send
   // audio/image, the evidence text captured from the generator is enough.
   const callRevisionModel = async (userText: string): Promise<string> => {
-    const response = await fetch(NVIDIA_CHAT_URL, {
+    const response = await fetchWithTimeout(NVIDIA_CHAT_URL, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -178,7 +183,7 @@ export async function analyzeVideoAndGenerateMetadata(
           { role: 'user', content: userText },
         ],
       }),
-    });
+    }, REVISION_TIMEOUT_MS);
 
     if (!response.ok) {
       const errText = await response.text();
@@ -224,6 +229,25 @@ export async function analyzeVideoAndGenerateMetadata(
           error: (err as Error).message,
         });
         return current;
+      }
+
+      // Semantic embedding check: an ADDITIONAL signal alongside the LLM verifier, not
+      // a replacement (calibrated with real test data - see embeddings.ts). Catches
+      // keywords the LLM verifier might rubber-stamp; a failure here fails open rather
+      // than blocking the pipeline on a non-critical secondary check.
+      try {
+        const evidenceText = [evidence.transcript, evidence.visualSummary].filter(Boolean).join('. ');
+        const semanticFlags = await semanticKeywordCheck(current.keywords, evidenceText);
+        for (const flag of semanticFlags) {
+          if (!verification.invalidKeywords.some((k) => k.keyword.toLowerCase() === flag.keyword.toLowerCase())) {
+            verification.invalidKeywords.push({
+              keyword: flag.keyword,
+              reason: `Low semantic similarity to evidence (${flag.similarity}) - likely unrelated`,
+            });
+          }
+        }
+      } catch (err: unknown) {
+        await log('WARN', 'AI', `Semantic keyword check unavailable for ${filename}`, { error: (err as Error).message });
       }
 
       if (verification.approved && verification.invalidKeywords.length === 0) {
