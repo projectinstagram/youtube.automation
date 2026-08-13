@@ -1,6 +1,7 @@
 import type { GeneratedMetadata } from '@/types';
 import { log } from '@/lib/db/operations';
 import { extractContactSheet, extractAudioTrack } from '@/lib/video/frames';
+import { verifyMetadata, buildRevisionPrompt, type Evidence } from '@/lib/gemini/verifier';
 
 function requireEnv(key: string): string {
   const val = process.env[key];
@@ -124,7 +125,7 @@ export async function analyzeVideoAndGenerateMetadata(
     return json.choices?.[0]?.message?.content ?? '';
   };
 
-  const parseMetadata = (text: string): GeneratedMetadata => {
+  const parseMetadata = (text: string): { metadata: GeneratedMetadata; evidence: Evidence } => {
     // Strip markdown code blocks and any leading/trailing chatter around the JSON object
     let cleaned = text
       .replace(/```json\s*/gi, '')
@@ -138,7 +139,100 @@ export async function analyzeVideoAndGenerateMetadata(
     }
 
     const parsed = JSON.parse(cleaned);
-    return validateAndNormalizeMetadata(parsed, options);
+    const metadata = validateAndNormalizeMetadata(parsed, options);
+    const evidence: Evidence = {
+      transcript: typeof parsed._transcript === 'string' ? parsed._transcript : undefined,
+      visualSummary: typeof parsed._visualSummary === 'string' ? parsed._visualSummary : undefined,
+    };
+    return { metadata, evidence };
+  };
+
+  // Fast text-only model call, used for the revision pass - no need to re-send
+  // audio/image, the evidence text captured from the generator is enough.
+  const callRevisionModel = async (userText: string): Promise<string> => {
+    const response = await fetch(NVIDIA_CHAT_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'meta/llama-3.1-8b-instruct',
+        temperature: 0.5,
+        max_tokens: 1024,
+        messages: [
+          { role: 'system', content: systemMessage },
+          { role: 'user', content: userText },
+        ],
+      }),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`NVIDIA API error ${response.status}: ${errText.slice(0, 300)}`);
+    }
+
+    const json = await response.json();
+    return json.choices?.[0]?.message?.content ?? '';
+  };
+
+  const parseRevision = (text: string): GeneratedMetadata => {
+    let cleaned = text.replace(/```json\s*/gi, '').replace(/```\s*/gi, '').trim();
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace !== -1) {
+      cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+    }
+    return validateAndNormalizeMetadata(JSON.parse(cleaned), options);
+  };
+
+  // Independently verifies metadata against the actual evidence (different model than
+  // the generator), and gives it one revision attempt if rejected. Never returns metadata
+  // that failed verification - callers must fall back to safe filename-based metadata
+  // instead of uploading something the auditor flagged as unsupported/hallucinated.
+  const verifyAndRevise = async (
+    evidence: Evidence,
+    initialMetadata: GeneratedMetadata
+  ): Promise<GeneratedMetadata | null> => {
+    let current = initialMetadata;
+
+    for (let round = 1; round <= 2; round++) {
+      let verification;
+      try {
+        verification = await verifyMetadata(evidence, current, filename);
+      } catch (err: unknown) {
+        // Verifier infrastructure itself failed (not a rejection) - don't let a transient
+        // verifier outage force every video into filename-fallback mode, but make the
+        // skip clearly visible in logs rather than silently treating it as approved.
+        await log('WARN', 'AI', `Verifier unavailable for ${filename}, proceeding without verification for this run`, {
+          error: (err as Error).message,
+        });
+        return current;
+      }
+
+      if (verification.approved && verification.invalidKeywords.length === 0) {
+        return current;
+      }
+
+      if (round === 2) {
+        await log('ERROR', 'AI', `Metadata still rejected by verifier after revision for ${filename}`, {
+          issues: verification.issues,
+          invalidKeywords: verification.invalidKeywords,
+        });
+        return null;
+      }
+
+      try {
+        const revisionRaw = await callRevisionModel(buildRevisionPrompt(evidence, current, verification));
+        current = parseRevision(revisionRaw);
+      } catch (err: unknown) {
+        await log('WARN', 'AI', `Revision attempt failed for ${filename}`, { error: (err as Error).message });
+        return null;
+      }
+    }
+
+    return null;
   };
 
   // Short "I cannot..." replies are a safety-classifier refusal (usually triggered by the
@@ -167,13 +261,13 @@ export async function analyzeVideoAndGenerateMetadata(
           : basePrompt;
 
       rawResponse = await callModel(userText, useAudio, useImage);
-      const metadata = parseMetadata(rawResponse);
+      const { metadata, evidence } = parseMetadata(rawResponse);
 
       if (containsNonLatinScript(metadata.title) || containsNonLatinScript(metadata.description)) {
         throw new Error('Generated metadata contains non-English script despite English-only instruction');
       }
 
-      await log('INFO', 'AI', `Metadata generated successfully`, {
+      await log('INFO', 'AI', `Metadata generated, running independent verification`, {
         title: metadata.title,
         confidence: metadata.confidence,
         score: metadata.metadataScore,
@@ -181,6 +275,20 @@ export async function analyzeVideoAndGenerateMetadata(
         usedAudio: useAudio,
         usedImage: useImage,
       });
+
+      // Only meaningful when there's real evidence to check against - a pure text-only
+      // fallback attempt (no audio, no image) has nothing for the verifier to audit.
+      if (useAudio || useImage) {
+        const verified = await verifyAndRevise(evidence, metadata);
+        if (verified) {
+          await log('INFO', 'AI', `Metadata verified successfully`, { title: verified.title });
+          return verified;
+        }
+        // Verification rejected the metadata even after a revision attempt - never upload
+        // unverified/flagged content, fall back to the safe filename-based metadata instead.
+        await log('ERROR', 'AI', `Metadata failed independent verification for ${filename}, using safe fallback`);
+        return generateFallbackMetadata(filename, options);
+      }
 
       return metadata;
     } catch (err: unknown) {
@@ -339,7 +447,9 @@ Return ONLY valid JSON matching this exact schema, with no other text before or 
   "metadataScore": number (0-100, overall quality score),
   "relevanceScore": number (0-100, keyword relevance to actual content),
   "searchabilityScore": number (0-100, how discoverable this will be),
-  "spamRisk": number (0-100, 0=no spam risk, 100=very spammy)
+  "spamRisk": number (0-100, 0=no spam risk, 100=very spammy),
+  "_transcript": ${hasAudio ? '"string (what was actually said, as close to verbatim as you can - this is used to independently verify your metadata afterward, so be accurate)"' : 'null'},
+  "_visualSummary": ${hasImage ? '"string (what is actually visible in the frames - this is used to independently verify your metadata afterward, so be accurate)"' : 'null'}
 }
 
 YouTube Category IDs for reference:
