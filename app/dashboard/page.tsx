@@ -19,6 +19,7 @@ import {
   TrendingUp,
   ExternalLink,
   Settings,
+  Wrench,
 } from 'lucide-react';
 import Link from 'next/link';
 import { format, formatDistanceToNow } from 'date-fns';
@@ -58,6 +59,7 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [triggering, setTriggering] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [repairing, setRepairing] = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
 
   const fetchHealth = useCallback(async () => {
@@ -101,6 +103,30 @@ export default function DashboardPage() {
       alert(`Error: ${err}`);
     } finally {
       setTriggering(false);
+      fetchHealth();
+    }
+  };
+
+  const handleRunRepair = async () => {
+    const secret = prompt('Enter CRON_SECRET to repair recent videos (last 48h with weak/missing metadata):');
+    if (!secret) return;
+
+    setRepairing(true);
+    try {
+      const res = await fetch('/api/repair', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${secret}` },
+      });
+      const data = await res.json();
+      if (data.success) {
+        alert(`✅ Repair pass complete!\nRepaired: ${data.data.repaired}\nAttempted: ${data.data.attempted}`);
+      } else {
+        alert(`❌ Failed: ${data.error}`);
+      }
+    } catch (err) {
+      alert(`Error: ${err}`);
+    } finally {
+      setRepairing(false);
       fetchHealth();
     }
   };
@@ -153,6 +179,14 @@ export default function DashboardPage() {
             >
               <FolderOpen className="w-4 h-4" />
               {syncing ? 'Syncing...' : 'Sync Drive'}
+            </button>
+            <button
+              onClick={handleRunRepair}
+              disabled={repairing}
+              className="flex items-center gap-2 px-3 py-2 text-sm text-orange-400 hover:text-orange-300 bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/30 rounded-lg transition-all disabled:opacity-50"
+            >
+              <Wrench className="w-4 h-4" />
+              {repairing ? 'Repairing...' : 'Run Repair'}
             </button>
             <button
               onClick={handleManualTrigger}

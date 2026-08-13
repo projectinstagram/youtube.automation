@@ -16,6 +16,9 @@ const REPAIR_WINDOW_HOURS = 48;
 // upload's AI step - kept to 1 per cron run so this can't blow the scheduler's
 // time budget on a run that's also trying to upload a new video.
 const REPAIR_BATCH_SIZE = 1;
+// A manually-triggered repair isn't sharing the run with an upload attempt, so
+// it can afford to clear more of the backlog in one click.
+const MANUAL_REPAIR_BATCH_SIZE = 5;
 
 /**
  * Finds recently-uploaded videos that went out with weak/unverified metadata
@@ -25,16 +28,21 @@ const REPAIR_BATCH_SIZE = 1;
  * still can't produce something verified, the live video is left untouched
  * rather than risk replacing one weak title with another. Respects
  * dry_run_mode like the rest of the pipeline.
+ *
+ * `force` skips the auto_repair_metadata toggle check - used by the manual
+ * "Run Repair" button, which should work even if the automatic pass is off.
  */
 export async function repairRecentMetadata(
   auth: OAuth2Client,
-  settings: AutomationSettings
+  settings: AutomationSettings,
+  options: { force?: boolean; batchSize?: number } = {}
 ): Promise<{ attempted: number; repaired: number }> {
-  if (!settings.auto_repair_metadata) {
+  if (!settings.auto_repair_metadata && !options.force) {
     return { attempted: 0, repaired: 0 };
   }
 
-  const candidates = await getVideosNeedingMetadataRepair(REPAIR_WINDOW_HOURS, REPAIR_BATCH_SIZE);
+  const batchSize = options.batchSize ?? (options.force ? MANUAL_REPAIR_BATCH_SIZE : REPAIR_BATCH_SIZE);
+  const candidates = await getVideosNeedingMetadataRepair(REPAIR_WINDOW_HOURS, batchSize);
   if (candidates.length === 0) {
     return { attempted: 0, repaired: 0 };
   }
@@ -74,10 +82,13 @@ export async function repairRecentMetadata(
       });
 
       if (!metadata.verification?.approved) {
-        await log('WARN', 'SCHEDULER', `Repair regeneration for ${video.filename} was not independently verified either - leaving the live video unchanged`, {
+        // Deliberately NOT marking metadata_repaired_at here - leave this video
+        // eligible so the next repair pass retries it (with fresh verification
+        // rounds) instead of giving up on it permanently after one failure.
+        // It naturally stops being a candidate once it ages out of the 48h window.
+        await log('WARN', 'SCHEDULER', `Repair regeneration for ${video.filename} was not independently verified either - leaving the live video unchanged, will retry next pass`, {
           videoId: video.id,
         });
-        await markMetadataRepairAttempted(video.id);
         continue;
       }
 
@@ -125,9 +136,10 @@ export async function repairRecentMetadata(
       });
     } catch (err: unknown) {
       const error = err as Error;
-      await log('ERROR', 'SCHEDULER', `Metadata repair failed for ${video.filename}: ${error.message}`, { videoId: video.id });
-      // Mark attempted even on failure - avoid retrying the same broken video every run
-      await markMetadataRepairAttempted(video.id);
+      // Not marking metadata_repaired_at - these are transient failures (download,
+      // AI call, YouTube API), so let the next pass retry rather than giving up
+      // on the video permanently because of a one-off error.
+      await log('ERROR', 'SCHEDULER', `Metadata repair failed for ${video.filename}, will retry next pass: ${error.message}`, { videoId: video.id });
     }
   }
 
