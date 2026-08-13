@@ -6,6 +6,12 @@ import { log } from '@/lib/db/operations';
 // ============================================================
 
 const SCOPES = [
+  // Upload alone isn't enough for videos.update (used by the metadata-repair
+  // feature) - Google's API requires the broader 'youtube' scope for editing
+  // an existing video's snippet, or it returns "insufficient authentication
+  // scopes". This scope already covers upload + readonly, but those are kept
+  // explicit below for clarity.
+  'https://www.googleapis.com/auth/youtube',
   'https://www.googleapis.com/auth/youtube.upload',
   'https://www.googleapis.com/auth/youtube.readonly',
   'https://www.googleapis.com/auth/drive.readonly',
