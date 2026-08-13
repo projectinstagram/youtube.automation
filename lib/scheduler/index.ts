@@ -12,11 +12,14 @@ import {
   getActiveDriveSource,
   updateYouTubeTokens,
   saveAIMetadata,
+  updateVideoFingerprint,
+  findDuplicateByFingerprint,
   log,
 } from '@/lib/db/operations';
 import { getAuthenticatedClient, decryptToken } from '@/lib/google/auth';
 import { getDriveFileStream, downloadDriveFile, checkDriveFileExists } from '@/lib/google/drive';
 import { syncDriveFolder } from '@/lib/scheduler/sync';
+import { computeFileHash, computeFrameHash } from '@/lib/video/fingerprint';
 import { analyzeVideoAndGenerateMetadata } from '@/lib/gemini/analyzer';
 import { uploadVideoToYouTube, verifyYouTubeVideo, checkYouTubeQuota } from '@/lib/youtube/upload';
 import { sendNotification } from '@/lib/notifications';
@@ -237,6 +240,26 @@ async function processVideo(
       mimeType = mt;
       fileSize = size;
     }
+
+    // -------- STEP 2b: Content-based duplicate check --------
+    // Runs on the video bytes we already downloaded, before spending an AI call on
+    // it - catches same-content-different-filename (or re-encoded) duplicates that
+    // the earlier filename-based check in upsertVideoFromDrive can't see.
+    const fileHash = computeFileHash(videoBuffer);
+    const frameHash = await computeFrameHash(videoBuffer).catch(() => null);
+    const duplicate = await findDuplicateByFingerprint(fileHash, frameHash, videoId);
+
+    if (duplicate) {
+      await log('WARN', 'SCHEDULER', `Duplicate content detected for ${filename}, matches video ${duplicate.id} (${duplicate.filename})`, {
+        videoId,
+        duplicateOf: duplicate.id,
+      });
+      await updateVideoStatus(videoId, 'SKIPPED', { lastError: `Duplicate content of already-processed video: ${duplicate.filename}` });
+      await updateUploadJob(job.id, { status: 'CANCELLED', error_message: 'Duplicate content detected' });
+      return;
+    }
+
+    await updateVideoFingerprint(videoId, fileHash, frameHash);
 
     // -------- STEP 3: Generate Metadata --------
     await log('INFO', 'AI', `Generating metadata for: ${filename}`);

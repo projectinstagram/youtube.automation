@@ -234,6 +234,60 @@ export async function getVideoById(videoId: string): Promise<Video | null> {
   return data as Video | null;
 }
 
+export async function updateVideoFingerprint(videoId: string, fileHash: string, frameHash: string | null): Promise<void> {
+  const { error } = await supabase.from('videos').update({ file_hash: fileHash, frame_hash: frameHash }).eq('id', videoId);
+  if (error) console.error('Failed to save video fingerprint:', error);
+}
+
+/**
+ * Checks the new video's content fingerprint against already-uploaded/in-flight
+ * videos: an exact file_hash match (byte-identical re-upload), or a frame_hash
+ * within a small Hamming distance (re-encoded copy of the same footage - see
+ * lib/video/fingerprint.ts for how the threshold was calibrated). Limited to a
+ * reasonably recent window so this stays cheap as the channel's history grows.
+ */
+export async function findDuplicateByFingerprint(
+  fileHash: string,
+  frameHash: string | null,
+  excludeVideoId: string
+): Promise<Video | null> {
+  const { data, error } = await supabase
+    .from('videos')
+    .select('*')
+    .neq('id', excludeVideoId)
+    .in('status', ['UPLOADED', 'UPLOADING', 'PROCESSING', 'READY'])
+    .not('file_hash', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(500);
+
+  if (error) {
+    console.error('Failed to query for duplicate fingerprints:', error);
+    return null; // Fail open - a lookup error shouldn't block the pipeline
+  }
+
+  const candidates = (data as Video[]) || [];
+
+  const exactMatch = candidates.find((v) => v.file_hash === fileHash);
+  if (exactMatch) return exactMatch;
+
+  if (frameHash) {
+    // Hamming distance inline (avoids importing the fingerprint module's ffmpeg
+    // dependency into this file just for the bit-counting helper)
+    const HAMMING_DUPLICATE_THRESHOLD = 8;
+    for (const candidate of candidates) {
+      if (!candidate.frame_hash || candidate.frame_hash.length !== frameHash.length) continue;
+      let distance = 0;
+      for (let i = 0; i < frameHash.length; i++) {
+        const xor = parseInt(frameHash[i], 16) ^ parseInt(candidate.frame_hash[i], 16);
+        distance += xor.toString(2).split('1').length - 1;
+      }
+      if (distance <= HAMMING_DUPLICATE_THRESHOLD) return candidate;
+    }
+  }
+
+  return null;
+}
+
 // ============================================================
 // AI METADATA
 // ============================================================
