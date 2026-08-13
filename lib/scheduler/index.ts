@@ -198,7 +198,13 @@ async function processVideo(
   const job = await createUploadJob(videoId, cronRunId);
 
   try {
-    // Atomically reserve the video
+    // Atomically reserve the video. If it was already PROCESSING (from a crashed/
+    // timed-out previous run) and stale enough to reclaim, atomicReserveVideo lets
+    // this through anyway - log it so a reclaimed stale lock is visible, not silent.
+    if (video.status === 'PROCESSING') {
+      await log('WARN', 'SCHEDULER', `Reclaiming stale lock on video ${videoId} (${filename}) - likely an earlier run crashed or timed out mid-processing`);
+    }
+
     const reserved = await atomicReserveVideo(videoId, cronRunId);
     if (!reserved) {
       await log('WARN', 'SCHEDULER', `Video ${videoId} already being processed, skipping`);

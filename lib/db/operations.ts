@@ -178,11 +178,18 @@ export async function upsertVideoFromDrive(driveFileId: string, filename: string
   return { video: data as Video, isNew: true, isDuplicate };
 }
 
+// If a cron run crashes/times out mid-processing, a video is left stuck in
+// PROCESSING forever with no code path to release it - there was no timeout-based
+// recovery. After this many minutes without an update, treat a PROCESSING video
+// as abandoned and make it eligible again, same as a fresh video.
+const STALE_LOCK_MINUTES = 15;
+
 export async function getEligibleVideos(strategy: string, limit: number, maxRetries: number): Promise<Video[]> {
+  const staleThreshold = new Date(Date.now() - STALE_LOCK_MINUTES * 60 * 1000).toISOString();
   const { data, error } = await supabase
     .from('videos')
     .select('*')
-    .or(`status.in.(DISCOVERED,QUEUED,READY),and(status.eq.FAILED,upload_attempts.lt.${maxRetries})`)
+    .or(`status.in.(DISCOVERED,QUEUED,READY),and(status.eq.FAILED,upload_attempts.lt.${maxRetries}),and(status.eq.PROCESSING,updated_at.lt.${staleThreshold})`)
     .order(strategy === 'MANUAL_PRIORITY' ? 'priority' : 'discovered_at', { ascending: strategy !== 'MANUAL_PRIORITY' })
     .limit(limit);
 
@@ -192,11 +199,12 @@ export async function getEligibleVideos(strategy: string, limit: number, maxRetr
 }
 
 export async function atomicReserveVideo(videoId: string, _cronRunId: string): Promise<boolean> {
+  const staleThreshold = new Date(Date.now() - STALE_LOCK_MINUTES * 60 * 1000).toISOString();
   const { data, error } = await supabase
     .from('videos')
     .update({ status: 'PROCESSING', updated_at: new Date().toISOString() })
     .eq('id', videoId)
-    .in('status', ['DISCOVERED', 'QUEUED', 'READY', 'FAILED'])
+    .or(`status.in.(DISCOVERED,QUEUED,READY,FAILED),and(status.eq.PROCESSING,updated_at.lt.${staleThreshold})`)
     .select('id');
   if (error) { console.error('Atomic reserve error:', error); return false; }
   return Array.isArray(data) && data.length > 0;
