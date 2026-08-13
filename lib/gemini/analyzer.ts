@@ -2,6 +2,8 @@ import type { GeneratedMetadata } from '@/types';
 import { log } from '@/lib/db/operations';
 import { extractContactSheet, extractAudioTrack } from '@/lib/video/frames';
 import { verifyMetadata, buildRevisionPrompt, type Evidence } from '@/lib/gemini/verifier';
+import { classifyError } from '@/lib/gemini/errors';
+import { isCircuitOpen } from '@/lib/gemini/circuitBreaker';
 
 function requireEnv(key: string): string {
   const val = process.env[key];
@@ -82,6 +84,13 @@ export async function analyzeVideoAndGenerateMetadata(
   const fallbackVisionModel = options.aiModel && KNOWN_VISION_MODELS.has(options.aiModel)
     ? options.aiModel
     : DEFAULT_VISION_MODEL;
+
+  // Skip straight to the vision-only fallback if the omni model has been failing
+  // repeatedly (e.g. an NVIDIA-side outage) instead of burning retries against a model
+  // that's known to be down right now.
+  if (hasAudio && (await isCircuitOpen(OMNI_MODEL))) {
+    hasAudio = false;
+  }
 
   await log('INFO', 'AI', `Analyzing video: ${filename}`, {
     hasFrames,
@@ -295,22 +304,36 @@ export async function analyzeVideoAndGenerateMetadata(
       const error = err as Error;
       const refused = (useAudio || useImage) && looksLikeRefusal(rawResponse);
       nonEnglishDetected = error.message.includes('non-English script');
+      const classified = classifyError(error);
+      const attemptedModel = useAudio ? OMNI_MODEL : fallbackVisionModel;
 
       await log(attempt === 4 ? 'ERROR' : 'WARN', 'AI', `Attempt ${attempt} failed to generate metadata for ${filename}`, {
         error: error.message,
         rawResponse: rawResponse.slice(0, 500),
         refused,
         nonEnglishDetected,
+        errorCode: classified.code,
+        retryable: classified.retryable,
+        model: attemptedModel,
       });
+
+      // No retry strategy here (dropping media, reinforcing JSON-only) can ever fix a
+      // bad API key or a malformed request - stop burning attempts against it immediately.
+      if (classified.code === 'AUTHENTICATION_FAILED' || classified.code === 'MALFORMED_REQUEST') {
+        break;
+      }
 
       if (nonEnglishDetected) {
         reinforce = false;
-      } else if (refused && useAudio) {
-        // Drop audio first - it's the more likely refusal trigger (speech content) and the
-        // omni model is also the slowest option, so falling back to image-only is a double win
+      } else if ((refused || classified.code === 'MODEL_UNAVAILABLE') && useAudio) {
+        // Drop audio first - it's the more likely refusal trigger (speech content), the
+        // omni model is also the slowest option, and a MODEL_UNAVAILABLE/DEGRADED model
+        // will never succeed no matter how the prompt is reworded - so this also covers
+        // that case, falling back to the (separate) vision-only model instead of retrying
+        // a model that's confirmed down.
         useAudio = false;
         reinforce = false;
-      } else if (refused && useImage) {
+      } else if ((refused || classified.code === 'MODEL_UNAVAILABLE') && useImage) {
         useImage = false;
         reinforce = false;
       } else {

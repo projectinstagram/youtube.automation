@@ -137,8 +137,13 @@ export async function verifyMetadata(
   const json = await response.json();
   const rawContent: string = json.choices?.[0]?.message?.content ?? '';
   const result = parseVerifierResponse(rawContent);
+  // The actual pass/fail gate (in analyzer.ts) requires both approved=true AND no
+  // invalid keywords - a verifier can self-report "approved" while still listing
+  // flagged keywords, so log using the same combined condition to avoid a
+  // "passed" log line followed immediately by a revision attempt.
+  const trulyPassed = result.approved && result.invalidKeywords.length === 0;
 
-  await log(result.approved ? 'INFO' : 'WARN', 'AI', `Verification ${result.approved ? 'passed' : 'failed'} for ${filename}`, {
+  await log(trulyPassed ? 'INFO' : 'WARN', 'AI', `Verification ${trulyPassed ? 'passed' : 'failed'} for ${filename}`, {
     overallScore: result.overallScore,
     invalidKeywords: result.invalidKeywords,
     issues: result.issues,

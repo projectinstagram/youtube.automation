@@ -353,6 +353,35 @@ export async function getLogs(limit = 100, component?: string, level?: string): 
   return (data as SystemLog[]) || [];
 }
 
+/**
+ * Counts recent consecutive-ish AI failure logs for a specific model, used to drive
+ * a circuit breaker. Reuses the existing system_logs table (no new schema) - each
+ * serverless invocation is a fresh process, so an in-memory circuit breaker would
+ * reset every cron run and never actually trip; this makes the breaker state
+ * persist across invocations by deriving it from recent log history instead.
+ *
+ * Deliberately counts WARN as well as ERROR: a per-attempt failure against a
+ * struggling model is logged at WARN until the final attempt, so filtering to
+ * ERROR-only meant a model that fails fast (attempt 1) but always recovers via
+ * fallback would never accumulate enough ERROR rows to trip the breaker at all.
+ */
+export async function getRecentModelFailureCount(model: string, windowMinutes: number): Promise<number> {
+  const since = new Date(Date.now() - windowMinutes * 60 * 1000).toISOString();
+  const { count, error } = await supabase
+    .from('system_logs')
+    .select('id', { count: 'exact', head: true })
+    .eq('component', 'AI')
+    .in('level', ['WARN', 'ERROR'])
+    .eq('metadata->>model', model)
+    .gte('created_at', since);
+
+  if (error) {
+    console.error('Failed to query recent model failures:', error);
+    return 0; // Fail open - a logging query error shouldn't block the pipeline
+  }
+  return count || 0;
+}
+
 // ============================================================
 // DAILY UPLOAD COUNT
 // ============================================================
