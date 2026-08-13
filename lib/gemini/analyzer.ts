@@ -205,9 +205,11 @@ export async function analyzeVideoAndGenerateMetadata(
   };
 
   // Independently verifies metadata against the actual evidence (different model than
-  // the generator), and gives it one revision attempt if rejected. Never returns metadata
-  // that failed verification - callers must fall back to safe filename-based metadata
-  // instead of uploading something the auditor flagged as unsupported/hallucinated.
+  // the generator), and gives it up to 2 revision attempts if rejected (3 verification
+  // passes total). Never returns metadata that failed verification - callers must fall
+  // back to safe filename-based metadata instead of uploading something the auditor
+  // flagged as unsupported/hallucinated.
+  const MAX_VERIFICATION_ROUNDS = 3;
   const verifyAndRevise = async (
     evidence: Evidence,
     initialMetadata: GeneratedMetadata
@@ -215,7 +217,7 @@ export async function analyzeVideoAndGenerateMetadata(
     let current = initialMetadata;
     let revised = false;
 
-    for (let round = 1; round <= 2; round++) {
+    for (let round = 1; round <= MAX_VERIFICATION_ROUNDS; round++) {
       let verification;
       try {
         verification = await verifyMetadata(evidence, current, filename);
@@ -263,8 +265,8 @@ export async function analyzeVideoAndGenerateMetadata(
         };
       }
 
-      if (round === 2) {
-        await log('ERROR', 'AI', `Metadata still rejected by verifier after revision for ${filename}`, {
+      if (round === MAX_VERIFICATION_ROUNDS) {
+        await log('ERROR', 'AI', `Metadata still rejected by verifier after ${round - 1} revision(s) for ${filename}`, {
           issues: verification.issues,
           invalidKeywords: verification.invalidKeywords,
         });
