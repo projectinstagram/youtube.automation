@@ -83,6 +83,7 @@ export interface Video {
   updated_at: string;
   file_hash?: string | null;
   frame_hash?: string | null;
+  metadata_repaired_at?: string | null;
 }
 
 export interface AIMetadata {
@@ -168,6 +169,7 @@ export interface AutomationSettings {
   max_keywords: number;
   max_hashtags: number;
   title_style: TitleStyle;
+  auto_repair_metadata: boolean;
   notify_email?: string;
   notify_on_success: boolean;
   notify_on_failure: boolean;

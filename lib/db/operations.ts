@@ -296,6 +296,71 @@ export async function findDuplicateByFingerprint(
   return null;
 }
 
+/**
+ * Finds recently-uploaded videos whose metadata looks weak/unverified and
+ * haven't had a repair attempt yet - candidates for the auto-repair pass.
+ * "Weak" means: never independently verified (verification_approved is not
+ * true), a low metadata_score, or the literal fallback description template
+ * ("Watch this amazing Short! ...") - a direct fingerprint of generateFallback
+ * Metadata() having been used, e.g. because the AI pipeline was down at
+ * upload time. Fetches videos and ai_metadata separately and joins in JS
+ * since Supabase's query builder doesn't do this kind of cross-table OR
+ * condition cleanly.
+ */
+export async function getVideosNeedingMetadataRepair(hoursWindow: number, limit: number): Promise<Video[]> {
+  const since = new Date(Date.now() - hoursWindow * 60 * 60 * 1000).toISOString();
+
+  const { data: videos, error } = await supabase
+    .from('videos')
+    .select('*')
+    .eq('status', 'UPLOADED')
+    .gte('uploaded_at', since)
+    .is('metadata_repaired_at', null)
+    .order('uploaded_at', { ascending: true })
+    .limit(50); // candidate pool to filter in JS, not the final repair count
+
+  if (error) {
+    console.error('Failed to query videos needing metadata repair:', error);
+    return [];
+  }
+  if (!videos || videos.length === 0) return [];
+
+  const videoIds = videos.map((v) => v.id);
+  const { data: aiMeta } = await supabase
+    .from('ai_metadata')
+    .select('video_id, verification_approved, metadata_score, description')
+    .in('video_id', videoIds);
+
+  const metaByVideoId = new Map((aiMeta || []).map((m) => [m.video_id, m]));
+
+  const needsRepair = (videos as Video[]).filter((v) => {
+    const meta = metaByVideoId.get(v.id);
+    if (!meta) return true; // No metadata row at all - definitely needs attention
+    if (meta.verification_approved !== true) return true;
+    if (typeof meta.metadata_score === 'number' && meta.metadata_score <= 30) return true;
+    if (typeof meta.description === 'string' && meta.description.startsWith('Watch this amazing Short!')) return true;
+    return false;
+  });
+
+  return needsRepair.slice(0, limit);
+}
+
+export async function markMetadataRepairAttempted(videoId: string): Promise<void> {
+  const { error } = await supabase.from('videos').update({ metadata_repaired_at: new Date().toISOString() }).eq('id', videoId);
+  if (error) console.error('Failed to mark metadata repair attempted:', error);
+}
+
+/**
+ * Updates only youtube_title after a metadata repair. Deliberately NOT reusing
+ * updateVideoStatus('UPLOADED', ...) for this - it would overwrite uploaded_at
+ * with the current time as a side effect, corrupting the original upload
+ * timestamp for what's just a metadata edit, not a re-upload.
+ */
+export async function updateVideoYoutubeTitle(videoId: string, youtubeTitle: string): Promise<void> {
+  const { error } = await supabase.from('videos').update({ youtube_title: youtubeTitle }).eq('id', videoId);
+  if (error) console.error('Failed to update video youtube_title:', error);
+}
+
 // ============================================================
 // AI METADATA
 // ============================================================

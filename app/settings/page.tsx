@@ -235,6 +235,18 @@ export default function SettingsPage() {
                 onChange={(v) => { setSettings({ ...settings, dry_run_mode: v }); save({ dry_run_mode: v }); }}
               />
             </div>
+            <div className="flex items-center justify-between p-4 bg-gray-800/50 rounded-lg mt-3">
+              <div>
+                <p className="text-sm font-medium text-gray-200">Auto-Repair Recent Metadata</p>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Automatically re-check and fix title/description/keywords on videos uploaded in the last 48 hours that went out with weak or unverified metadata
+                </p>
+              </div>
+              <Toggle
+                checked={settings.auto_repair_metadata}
+                onChange={(v) => { setSettings({ ...settings, auto_repair_metadata: v }); save({ auto_repair_metadata: v }); }}
+              />
+            </div>
           </Section>
 
           {/* ---- YOUTUBE ---- */}

@@ -19,6 +19,7 @@ import {
 import { getAuthenticatedClient, decryptToken } from '@/lib/google/auth';
 import { getDriveFileStream, downloadDriveFile, checkDriveFileExists } from '@/lib/google/drive';
 import { syncDriveFolder } from '@/lib/scheduler/sync';
+import { repairRecentMetadata } from '@/lib/scheduler/repair';
 import { computeFileHash, computeFrameHash } from '@/lib/video/fingerprint';
 import { analyzeVideoAndGenerateMetadata } from '@/lib/gemini/analyzer';
 import { uploadVideoToYouTube, verifyYouTubeVideo, checkYouTubeQuota } from '@/lib/youtube/upload';
@@ -125,6 +126,20 @@ export async function runScheduler(triggeredBy: 'cron' | 'manual' = 'cron'): Pro
       await log('ERROR', 'SCHEDULER', 'YouTube API quota exceeded');
       result.errors.push('YouTube API quota exceeded');
       return result;
+    }
+
+    // 8b. Repair metadata on recently-uploaded videos that went out weak/unverified
+    // (e.g. the AI pipeline was degraded at upload time). Runs regardless of whether
+    // there's a new video to upload this cycle - it's fixing history, not uploading -
+    // so it must happen before the "no eligible videos" early return below, not after.
+    try {
+      const repairResult = await repairRecentMetadata(auth, settings);
+      if (repairResult.attempted > 0) {
+        await log('INFO', 'SCHEDULER', `Metadata repair pass: ${repairResult.repaired}/${repairResult.attempted} video(s) updated`);
+      }
+    } catch (err: unknown) {
+      const error = err as Error;
+      await log('WARN', 'SCHEDULER', `Metadata repair pass failed, continuing: ${error.message}`);
     }
 
     // 9. Get eligible videos. A cron run only uploads ONE video per trigger, so that

@@ -21,6 +21,7 @@ const SettingsSchema = z.object({
   max_keywords: z.number().int().min(1).max(50).optional(),
   max_hashtags: z.number().int().min(1).max(30).optional(),
   title_style: z.enum(['curiosity_with_accuracy', 'direct_and_clear', 'bold_statement', 'question_based']).optional(),
+  auto_repair_metadata: z.boolean().optional(),
   notify_email: z.string().email().optional().or(z.literal('')),
   notify_on_success: z.boolean().optional(),
   notify_on_failure: z.boolean().optional(),

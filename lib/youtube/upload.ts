@@ -106,6 +106,41 @@ export async function uploadVideoToYouTube(
 }
 
 /**
+ * Updates the title/description/tags/category of an already-published video.
+ * Used by the metadata-repair pass to fix videos that went out with weak
+ * fallback metadata. YouTube's videos.update requires the full snippet on
+ * every call - there's no partial-field-update mode - so all four fields are
+ * always sent together rather than merged server-side.
+ */
+export async function updateYouTubeVideoMetadata(
+  auth: OAuth2Client,
+  youtubeVideoId: string,
+  params: Pick<YouTubeUploadParams, 'title' | 'description' | 'tags' | 'categoryId'>
+): Promise<void> {
+  const youtube = google.youtube({ version: 'v3', auth });
+  const description = buildDescription(params);
+
+  await youtube.videos.update({
+    part: ['snippet'],
+    requestBody: {
+      id: youtubeVideoId,
+      snippet: {
+        title: params.title,
+        description,
+        tags: params.tags,
+        categoryId: params.categoryId,
+        defaultLanguage: 'en',
+      },
+    },
+  });
+
+  await log('INFO', 'YOUTUBE', `Updated metadata for already-published video ${youtubeVideoId}`, {
+    youtubeVideoId,
+    title: params.title,
+  });
+}
+
+/**
  * Verifies a YouTube video exists and is processing.
  */
 export async function verifyYouTubeVideo(
@@ -158,7 +193,7 @@ export async function checkYouTubeQuota(auth: OAuth2Client): Promise<boolean> {
 // Helpers
 // ============================================================
 
-function buildDescription(params: YouTubeUploadParams): string {
+function buildDescription(params: { description: string; tags: string[] }): string {
   const hashtagLine = params.tags
     .filter((t) => t.startsWith('#'))
     .slice(0, 5)
