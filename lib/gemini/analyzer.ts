@@ -18,6 +18,11 @@ function requireEnv(key: string): string {
 
 const NVIDIA_CHAT_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
 const DEFAULT_VISION_MODEL = 'nvidia/nemotron-nano-12b-v2-vl';
+// Used when the primary vision model is itself down (repeated SERVER_ERROR/
+// MODEL_UNAVAILABLE) - observed in production to happen for hours at a time,
+// which without a backup meant every video during that window fell all the
+// way to generic filename-based metadata instead of trying a different model.
+const BACKUP_VISION_MODEL = 'meta/llama-3.2-11b-vision-instruct';
 // Genuinely multimodal (audio + image + text) via the same chat-completions endpoint,
 // used automatically whenever the video has an audio track worth transcribing.
 const OMNI_MODEL = 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning';
@@ -92,6 +97,9 @@ export async function analyzeVideoAndGenerateMetadata(
   const fallbackVisionModel = options.aiModel && KNOWN_VISION_MODELS.has(options.aiModel)
     ? options.aiModel
     : DEFAULT_VISION_MODEL;
+  // Mutable: swapped to BACKUP_VISION_MODEL mid-retry-loop if fallbackVisionModel
+  // itself turns out to be down for this run.
+  let currentVisionModel = fallbackVisionModel;
 
   // Skip straight to the vision-only fallback if the omni model has been failing
   // repeatedly (e.g. an NVIDIA-side outage) instead of burning retries against a model
@@ -123,7 +131,7 @@ export async function analyzeVideoAndGenerateMetadata(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: includeAudio ? OMNI_MODEL : fallbackVisionModel,
+        model: includeAudio ? OMNI_MODEL : currentVisionModel,
         temperature,
         max_tokens: 1536,
         messages: [
@@ -347,7 +355,7 @@ export async function analyzeVideoAndGenerateMetadata(
       const refused = (useAudio || useImage) && looksLikeRefusal(rawResponse);
       nonEnglishDetected = error.message.includes('non-English script');
       const classified = classifyError(error);
-      const attemptedModel = useAudio ? OMNI_MODEL : fallbackVisionModel;
+      const attemptedModel = useAudio ? OMNI_MODEL : currentVisionModel;
 
       await log(attempt === 4 ? 'ERROR' : 'WARN', 'AI', `Attempt ${attempt} failed to generate metadata for ${filename}`, {
         error: error.message,
@@ -365,17 +373,27 @@ export async function analyzeVideoAndGenerateMetadata(
         break;
       }
 
+      // SERVER_ERROR is included alongside MODEL_UNAVAILABLE here because in practice
+      // NVIDIA's hosted models have shown sustained (multi-attempt, multi-hour) 500
+      // outages that plain retries never recover from - treated the same as a
+      // confirmed-down model rather than a one-off blip worth just resending.
+      const modelLooksDown = refused || classified.code === 'MODEL_UNAVAILABLE' || classified.code === 'SERVER_ERROR';
+
       if (nonEnglishDetected) {
         reinforce = false;
-      } else if ((refused || classified.code === 'MODEL_UNAVAILABLE') && useAudio) {
+      } else if (modelLooksDown && useAudio) {
         // Drop audio first - it's the more likely refusal trigger (speech content), the
-        // omni model is also the slowest option, and a MODEL_UNAVAILABLE/DEGRADED model
-        // will never succeed no matter how the prompt is reworded - so this also covers
-        // that case, falling back to the (separate) vision-only model instead of retrying
-        // a model that's confirmed down.
+        // omni model is also the slowest option, and there's no comparable backup
+        // audio-capable model to switch to.
         useAudio = false;
         reinforce = false;
-      } else if ((refused || classified.code === 'MODEL_UNAVAILABLE') && useImage) {
+      } else if (modelLooksDown && useImage && currentVisionModel !== BACKUP_VISION_MODEL) {
+        // The vision model itself appears to be down - try a different model before
+        // giving up on visual evidence entirely and falling to text-only/filename-based
+        // fallback metadata.
+        currentVisionModel = BACKUP_VISION_MODEL;
+        reinforce = false;
+      } else if (modelLooksDown && useImage) {
         useImage = false;
         reinforce = false;
       } else {

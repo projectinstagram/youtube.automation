@@ -34,7 +34,11 @@ export function classifyError(err: unknown): ClassifiedError {
   const statusMatch = message.match(/NVIDIA API error (\d+)/);
   const status = statusMatch ? parseInt(statusMatch[1], 10) : null;
 
-  if (lower.includes('degraded function cannot be invoked') || lower.includes('function is not deployed')) {
+  if (
+    lower.includes('degraded function cannot be invoked') ||
+    lower.includes('function is not deployed') ||
+    (lower.includes('function') && lower.includes('not found'))
+  ) {
     return { code: 'MODEL_UNAVAILABLE', retryable: false, message };
   }
   if (status === 401 || status === 403 || lower.includes('invalid api key') || lower.includes('unauthorized')) {
