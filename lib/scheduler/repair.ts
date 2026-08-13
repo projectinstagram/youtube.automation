@@ -12,13 +12,16 @@ import { updateYouTubeVideoMetadata } from '@/lib/youtube/upload';
 import type { AutomationSettings } from '@/types';
 
 const REPAIR_WINDOW_HOURS = 48;
-// Re-runs the full generate+verify pipeline per candidate, same cost as a fresh
-// upload's AI step - kept to 1 per cron run so this can't blow the scheduler's
-// time budget on a run that's also trying to upload a new video.
-const REPAIR_BATCH_SIZE = 1;
-// A manually-triggered repair isn't sharing the run with an upload attempt, so
-// it can afford to clear more of the backlog in one click.
-const MANUAL_REPAIR_BATCH_SIZE = 5;
+// Fetch a generous pool up front; the deadline check below decides how many of
+// them actually get processed in this run, rather than guessing a fixed count.
+const REPAIR_CANDIDATE_POOL = 25;
+// Don't start a new repair attempt unless at least this much time remains
+// before the deadline - a single attempt (AI generation with retries, possibly
+// including the backup vision model) has been observed taking up to ~90s.
+const PER_VIDEO_SAFETY_MARGIN_MS = 90_000;
+// Used when no deadline is given (e.g. a bare manual call without a time
+// budget) so the pass still terminates instead of running unbounded.
+const DEFAULT_BUDGET_MS = 4 * 60 * 1000;
 
 /**
  * Finds recently-uploaded videos that went out with weak/unverified metadata
@@ -31,26 +34,38 @@ const MANUAL_REPAIR_BATCH_SIZE = 5;
  *
  * `force` skips the auto_repair_metadata toggle check - used by the manual
  * "Run Repair" button, which should work even if the automatic pass is off.
+ *
+ * `deadline` (epoch ms) bounds how long this can run for - processes as many
+ * candidates as safely fit instead of a fixed count, so the automatic pass
+ * embedded in every scheduled run clears more of the backlog on its own as
+ * time budget allows, without needing a human to keep clicking "Run Repair".
  */
 export async function repairRecentMetadata(
   auth: OAuth2Client,
   settings: AutomationSettings,
-  options: { force?: boolean; batchSize?: number } = {}
+  options: { force?: boolean; deadline?: number } = {}
 ): Promise<{ attempted: number; repaired: number }> {
   if (!settings.auto_repair_metadata && !options.force) {
     return { attempted: 0, repaired: 0 };
   }
 
-  const batchSize = options.batchSize ?? (options.force ? MANUAL_REPAIR_BATCH_SIZE : REPAIR_BATCH_SIZE);
-  const candidates = await getVideosNeedingMetadataRepair(REPAIR_WINDOW_HOURS, batchSize);
+  const deadline = options.deadline ?? Date.now() + DEFAULT_BUDGET_MS;
+  const candidates = await getVideosNeedingMetadataRepair(REPAIR_WINDOW_HOURS, REPAIR_CANDIDATE_POOL);
   if (candidates.length === 0) {
     return { attempted: 0, repaired: 0 };
   }
 
   const dryRun = settings.dry_run_mode || process.env.DRY_RUN === 'true';
   let repaired = 0;
+  let attempted = 0;
 
   for (const video of candidates) {
+    if (Date.now() > deadline - PER_VIDEO_SAFETY_MARGIN_MS) {
+      await log('INFO', 'SCHEDULER', `Repair pass stopping to preserve remaining time budget (${candidates.length - attempted} more candidate(s) queued for next pass)`);
+      break;
+    }
+    attempted++;
+
     await log('INFO', 'SCHEDULER', `Attempting metadata repair for ${video.filename} (uploaded ${video.uploaded_at})`, { videoId: video.id });
 
     try {
@@ -143,5 +158,5 @@ export async function repairRecentMetadata(
     }
   }
 
-  return { attempted: candidates.length, repaired };
+  return { attempted, repaired };
 }

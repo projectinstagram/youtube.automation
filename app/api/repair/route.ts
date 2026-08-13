@@ -56,7 +56,10 @@ export async function POST(request: NextRequest) {
       }
     );
 
-    const result = await repairRecentMetadata(auth, settings, { force: true });
+    // Self-imposed budget for a manual click - generous enough to clear a
+    // meaningful chunk of backlog in one go, bounded well under this route's
+    // maxDuration below.
+    const result = await repairRecentMetadata(auth, settings, { force: true, deadline: Date.now() + 4 * 60 * 1000 });
 
     await log('INFO', 'SCHEDULER', `Manual metadata repair complete: ${result.repaired}/${result.attempted} video(s) updated`);
 

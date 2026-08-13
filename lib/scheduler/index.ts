@@ -145,12 +145,17 @@ export async function runScheduler(triggeredBy: 'cron' | 'manual' = 'cron'): Pro
     // scheduled upload below (this happened in practice: repair alone took several
     // minutes retrying a degraded model and the run got killed by Vercel's timeout
     // before ever reaching the new video).
+    const repairDeadline = schedulerStartedAt + MAX_RUNTIME_MS - MIN_UPLOAD_BUDGET_MS;
     const elapsedBeforeRepair = Date.now() - schedulerStartedAt;
-    if (elapsedBeforeRepair > MAX_RUNTIME_MS - MIN_UPLOAD_BUDGET_MS) {
+    if (Date.now() > repairDeadline) {
       await log('WARN', 'SCHEDULER', `Skipping metadata repair pass to preserve time budget for the scheduled upload (${Math.round(elapsedBeforeRepair / 1000)}s already elapsed)`);
     } else {
       try {
-        const repairResult = await repairRecentMetadata(auth, settings);
+        // Budget-driven, not a fixed count - processes as many weak-metadata
+        // videos as safely fit in the time remaining before repairDeadline, so
+        // the backlog clears itself across scheduled runs without needing
+        // someone to keep clicking "Run Repair" by hand.
+        const repairResult = await repairRecentMetadata(auth, settings, { deadline: repairDeadline });
         if (repairResult.attempted > 0) {
           await log('INFO', 'SCHEDULER', `Metadata repair pass: ${repairResult.repaired}/${repairResult.attempted} video(s) updated`);
         }
@@ -385,12 +390,20 @@ async function processVideo(
       }
     );
 
-    // -------- STEP 6: Verify Upload --------
+    // -------- STEP 6: Verify Upload (best-effort, never fatal) --------
+    // uploadVideoToYouTube() already succeeded above and returned a real video
+    // ID - that response IS the authoritative confirmation the upload worked.
+    // This check is only for visibility into whether YouTube's read path has
+    // caught up yet; it must NEVER throw and send this video back into the
+    // retry queue, because that previously produced actual duplicate uploads
+    // in production (the insert succeeded, videos.list just lagged behind it,
+    // and treating that as a failure caused the same content to be re-uploaded
+    // as a second video while the first sat orphaned - not linked in the DB -
+    // on the channel).
     await log('INFO', 'YOUTUBE', `Verifying upload: ${uploadResult.videoId}`);
     const verification = await verifyYouTubeVideo(auth, uploadResult.videoId);
-
     if (!verification.exists) {
-      throw new Error(`YouTube video ${uploadResult.videoId} not found after upload`);
+      await log('WARN', 'YOUTUBE', `Could not confirm ${uploadResult.videoId} via videos.list yet - proceeding anyway since the upload call itself succeeded`, { videoId });
     }
 
     // -------- STEP 7: Mark as UPLOADED --------
