@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import {
   getSettings,
   getActiveYouTubeAccount,
-  getActiveDriveSource,
+  getActiveDriveSources,
   updateYouTubeTokens,
   log,
 } from '@/lib/db/operations';
@@ -41,8 +41,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'No active YouTube account configured' }, { status: 400 });
     }
 
-    const driveSource = await getActiveDriveSource();
-    if (!driveSource) {
+    const driveSources = await getActiveDriveSources();
+    if (driveSources.length === 0) {
       return NextResponse.json({ success: false, error: 'No active Google Drive source configured' }, { status: 400 });
     }
 

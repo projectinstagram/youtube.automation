@@ -116,16 +116,22 @@ export async function upsertDriveSource(folderId: string, folderName?: string, f
   return data as DriveSource;
 }
 
-export async function getActiveDriveSource(): Promise<DriveSource | null> {
+// Returns every connected Drive folder, not just one - the scheduler syncs
+// all of them each run so a channel can pull videos from multiple folders
+// at once instead of only ever watching whichever was connected most recently.
+export async function getActiveDriveSources(): Promise<DriveSource[]> {
   const { data, error } = await supabase
     .from('drive_sources')
     .select('*')
     .eq('is_active', true)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (error) throw new Error(`Failed to get drive source: ${error.message}`);
-  return data as DriveSource | null;
+    .order('created_at', { ascending: true });
+  if (error) throw new Error(`Failed to get drive sources: ${error.message}`);
+  return (data || []) as DriveSource[];
+}
+
+export async function deactivateDriveSource(id: string): Promise<void> {
+  const { error } = await supabase.from('drive_sources').update({ is_active: false }).eq('id', id);
+  if (error) throw new Error(`Failed to deactivate drive source: ${error.message}`);
 }
 
 export async function updateDriveSourceSyncTime(sourceId: string, count: number): Promise<void> {
@@ -447,7 +453,7 @@ export async function getDashboardStats(timezone: string, dailyLimit: number, re
   const todayFailed = todayHistory.filter((h) => h.status === 'FAILED').length;
 
   const account = await getActiveYouTubeAccount();
-  const driveSource = await getActiveDriveSource();
+  const driveSources = await getActiveDriveSources();
   const settings = await getSettings();
 
   return {
@@ -461,10 +467,15 @@ export async function getDashboardStats(timezone: string, dailyLimit: number, re
     lastUploadAt: lastUploadResult.data?.uploaded_at,
     lastUploadTitle: lastUploadResult.data?.title,
     automationActive: settings?.is_enabled || false,
-    driveConnected: !!driveSource,
+    driveConnected: driveSources.length > 0,
     youtubeConnected: !!account,
     channelName: account?.channel_name,
-    driveFolderName: driveSource?.folder_name,
+    driveFolderName:
+      driveSources.length === 0
+        ? undefined
+        : driveSources.length === 1
+          ? driveSources[0].folder_name
+          : `${driveSources.length} folders connected`,
   };
 }
 

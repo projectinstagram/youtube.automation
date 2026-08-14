@@ -9,7 +9,7 @@ import {
   recordUploadHistory,
   getTodayUploadCount,
   getActiveYouTubeAccount,
-  getActiveDriveSource,
+  getActiveDriveSources,
   updateYouTubeTokens,
   saveAIMetadata,
   updateVideoFingerprint,
@@ -18,7 +18,7 @@ import {
 } from '@/lib/db/operations';
 import { getAuthenticatedClient, decryptToken } from '@/lib/google/auth';
 import { getDriveFileStream, downloadDriveFile, checkDriveFileExists } from '@/lib/google/drive';
-import { syncDriveFolder } from '@/lib/scheduler/sync';
+import { syncAllDriveFolders } from '@/lib/scheduler/sync';
 import { repairRecentMetadata } from '@/lib/scheduler/repair';
 import { computeFileHash, computeFrameHash } from '@/lib/video/fingerprint';
 import { analyzeVideoAndGenerateMetadata } from '@/lib/gemini/analyzer';
@@ -96,9 +96,9 @@ export async function runScheduler(triggeredBy: 'cron' | 'manual' = 'cron'): Pro
       return result;
     }
 
-    // 6. Get Drive source
-    const driveSource = await getActiveDriveSource();
-    if (!driveSource) {
+    // 6. Get Drive source(s) - a channel can pull videos from more than one folder
+    const driveSources = await getActiveDriveSources();
+    if (driveSources.length === 0) {
       await log('ERROR', 'SCHEDULER', 'No active Google Drive source configured');
       result.errors.push('No active Drive source');
       return result;
@@ -115,13 +115,14 @@ export async function runScheduler(triggeredBy: 'cron' | 'manual' = 'cron'): Pro
       }
     );
 
-    // 7b. Sync the Drive folder so newly added videos are discovered automatically,
-    // without requiring someone to click "Sync Drive" by hand. A sync failure here
-    // shouldn't abort the run - fall back to whatever's already queued.
+    // 7b. Sync every connected Drive folder so newly added videos are discovered
+    // automatically, without requiring someone to click "Sync Drive" by hand. A
+    // sync failure here shouldn't abort the run - fall back to whatever's
+    // already queued.
     try {
-      const syncResult = await syncDriveFolder(auth, driveSource);
+      const syncResult = await syncAllDriveFolders(auth, driveSources);
       if (syncResult.newVideos > 0) {
-        await log('INFO', 'SCHEDULER', `Auto-discovered ${syncResult.newVideos} new video(s) from Drive`);
+        await log('INFO', 'SCHEDULER', `Auto-discovered ${syncResult.newVideos} new video(s) from Drive across ${driveSources.length} folder(s)`);
       }
     } catch (err: unknown) {
       const error = err as Error;

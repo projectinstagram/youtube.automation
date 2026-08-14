@@ -20,7 +20,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { clsx } from 'clsx';
-import type { AutomationSettings } from '@/types';
+import type { AutomationSettings, DriveSource } from '@/types';
 
 const TIMEZONES = [
   'Asia/Kolkata',
@@ -63,6 +63,8 @@ export default function SettingsPage() {
   const [saveMsg, setSaveMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [driveInput, setDriveInput] = useState('');
   const [driveSyncing, setDriveSyncing] = useState(false);
+  const [driveSources, setDriveSources] = useState<DriveSource[]>([]);
+  const [removingDriveSourceId, setRemovingDriveSourceId] = useState<string | null>(null);
   const [newUploadTime, setNewUploadTime] = useState('');
   const [newHashtag, setNewHashtag] = useState('');
   const [newKeyword, setNewKeyword] = useState('');
@@ -82,9 +84,21 @@ export default function SettingsPage() {
     }
   }, []);
 
+  const fetchDriveSources = useCallback(async () => {
+    try {
+      const res = await fetch('/api/drive/sync');
+      const data = await res.json();
+      if (data.success) setDriveSources(data.data);
+    } catch {
+      // Non-critical - the section just shows an empty list if this fails
+    }
+  }, []);
+
   useEffect(() => {
-    fetchSettings();
-  }, [fetchSettings]);
+    (async () => {
+      await Promise.all([fetchSettings(), fetchDriveSources()]);
+    })();
+  }, [fetchSettings, fetchDriveSources]);
 
   const save = async (patch: Partial<AutomationSettings>) => {
     setSaving(true);
@@ -122,9 +136,9 @@ export default function SettingsPage() {
       const data = await res.json();
       if (data.success) {
         const dupText = data.data.duplicatesSkipped > 0 ? `, ${data.data.duplicatesSkipped} duplicates skipped` : '';
-        setSaveMsg({ type: 'success', text: `Drive synced! ${data.data.newVideos} new videos found${dupText}` });
+        setSaveMsg({ type: 'success', text: `Folder connected! ${data.data.newVideos} new videos found${dupText}` });
         setDriveInput('');
-        fetchSettings();
+        fetchDriveSources();
       } else {
         setSaveMsg({ type: 'error', text: data.error || 'Drive sync failed' });
       }
@@ -132,6 +146,27 @@ export default function SettingsPage() {
       setSaveMsg({ type: 'error', text: 'Drive sync failed' });
     } finally {
       setDriveSyncing(false);
+    }
+  };
+
+  const removeDriveSource = async (id: string) => {
+    setRemovingDriveSourceId(id);
+    try {
+      const res = await fetch('/api/drive/sync', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setDriveSources((prev) => prev.filter((s) => s.id !== id));
+      } else {
+        setSaveMsg({ type: 'error', text: data.error || 'Failed to disconnect folder' });
+      }
+    } catch {
+      setSaveMsg({ type: 'error', text: 'Failed to disconnect folder' });
+    } finally {
+      setRemovingDriveSourceId(null);
     }
   };
 
@@ -303,8 +338,34 @@ export default function SettingsPage() {
 
           {/* ---- GOOGLE DRIVE ---- */}
           <Section icon={<FolderOpen className="w-4 h-4 text-blue-400" />} title="Google Drive">
+            {driveSources.length > 0 && (
+              <div className="mb-4 space-y-2">
+                {driveSources.map((source) => (
+                  <div
+                    key={source.id}
+                    className="flex items-center justify-between gap-3 px-3 py-2 bg-gray-800/50 border border-gray-800 rounded-lg"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <FolderOpen className="w-4 h-4 text-blue-400 flex-shrink-0" />
+                      <span className="text-sm text-gray-300 truncate">{source.folder_name || source.folder_id}</span>
+                      <span className="text-xs text-gray-600 flex-shrink-0">{source.total_videos_found} videos</span>
+                    </div>
+                    <button
+                      onClick={() => removeDriveSource(source.id)}
+                      disabled={removingDriveSourceId === source.id}
+                      className="p-1.5 text-gray-500 hover:text-red-400 hover:bg-red-500/10 rounded transition-all disabled:opacity-50 flex-shrink-0"
+                      title="Disconnect this folder"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
             <div>
-              <label className="block text-xs text-gray-500 mb-1.5">Drive Folder URL or ID</label>
+              <label className="block text-xs text-gray-500 mb-1.5">
+                {driveSources.length > 0 ? 'Add Another Drive Folder' : 'Drive Folder URL or ID'}
+              </label>
               <div className="flex gap-2">
                 <input
                   type="text"
@@ -323,7 +384,8 @@ export default function SettingsPage() {
                 </button>
               </div>
               <p className="text-xs text-gray-600 mt-1.5">
-                Connect a Google Drive folder containing your Shorts videos. New videos will be discovered automatically.
+                Connect one or more Google Drive folders containing your Shorts videos - every connected folder is synced
+                automatically on each scheduled run, and new videos across all of them are discovered without you doing anything.
               </p>
             </div>
           </Section>

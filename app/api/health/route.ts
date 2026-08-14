@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getDashboardStats, getSettings, getLogs, getActiveYouTubeAccount, getActiveDriveSource } from '@/lib/db/operations';
+import { getDashboardStats, getSettings, getLogs, getActiveYouTubeAccount, getActiveDriveSources } from '@/lib/db/operations';
 import { getNextUploadTime } from '@/lib/scheduler';
 
 /**
@@ -13,11 +13,11 @@ export async function GET() {
     const dailyLimit = settings?.daily_upload_limit || 2;
     const timezone = settings?.timezone || 'Asia/Kolkata';
 
-    const [stats, recentLogs, account, driveSource] = await Promise.all([
+    const [stats, recentLogs, account, driveSources] = await Promise.all([
       getDashboardStats(timezone, dailyLimit, settings?.upload_count_reset_at),
       getLogs(20),
       getActiveYouTubeAccount(),
-      getActiveDriveSource(),
+      getActiveDriveSources(),
     ]);
 
     // Calculate next upload time
@@ -36,7 +36,7 @@ export async function GET() {
       healthIssues.push('YouTube token may be expired');
     }
 
-    if (!driveSource) {
+    if (driveSources.length === 0) {
       healthIssues.push('No Google Drive folder configured');
     }
 
