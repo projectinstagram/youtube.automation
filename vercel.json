@@ -10,7 +10,7 @@
       "maxDuration": 300
     },
     "app/api/drive/sync/route.ts": {
-      "maxDuration": 60
+      "maxDuration": 300
     },
     "app/api/repair/route.ts": {
       "maxDuration": 300
